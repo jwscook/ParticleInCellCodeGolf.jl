@@ -34,7 +34,7 @@ Points represent the particles and The traces drawn across the plot represent
 the total energy, particle energy, wave energy, and total momentum, from top to
 bottom respectively (gif generated with src/NGPFourierWithDiagnostics.jl).
 
-## Gausian shapes particles
+## Gaussian shapes particles
 
 NGP particles are so noisey so I created a PIC code where the particles all have
 Gaussian shapes. Charge is deposited in each cell based on the integral of the
@@ -64,3 +64,7 @@ end every 8
 ```
 
 ![](https://github.com/jwscook/ParticleInCellCodeGolf.jl/blob/main/gifs/GaussianFixedPoint.gif)
+
+Note that the trajectories of the particles are smoother, this is because the particle
+shape functions are smoother. It's almost possible to see the step changes in velocity
+in the gif from the NGP version of the code.
