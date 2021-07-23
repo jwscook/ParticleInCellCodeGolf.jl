@@ -1,3 +1,4 @@
 gifs/NGPFourier.gif filter=lfs diff=lfs merge=lfs -text
 gifs/NGPFourierWithDiagnostics.gif filter=lfs diff=lfs merge=lfs -text
 gifs/GaussianFixedPoint.gif filter=lfs diff=lfs merge=lfs -text
+gifs/GaussianFixedPointQuiet.gif filter=lfs diff=lfs merge=lfs -text
