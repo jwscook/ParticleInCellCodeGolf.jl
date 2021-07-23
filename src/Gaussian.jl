@@ -1,6 +1,6 @@
 using FFTW, Plots, SpecialFunctions;
 NX=128; NP=64NX; dt = 1/10NX; NT=1024; W=1600; w=W/NP; dx=1/NX;
-x=rand(NP); v=rand([-1.0, 1.0], NP); u()=(x.=mod.(x.+v/2*dt,1))
+x=rand(NP); v=2collect(1:NP.>NP/2) .-1.; u()=(x.=mod.(x.+v/2*dt,1))
 ik=2π*im*vcat(1,1:NX/2,-NX/2+1:-1); K=zeros(NT, 2); ρ=zeros(NX);
 f(g, c)=erf((g-c)/dx)/2; ff(i, c) = f((i+0.5)*dx,c)-f((i-0.5)*dx,c)
 d(c)=((mod1(i,NX),ff(i, c)) for i∈(-6:6).+Int(round(c*NX)))
