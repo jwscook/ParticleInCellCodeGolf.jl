@@ -1,5 +1,5 @@
-using FFTW,LinearAlgebra,Plots,SpecialFunctions;pic=()->(N=64;P=64N;dt=1/6N;
-T=2^12;W=200;w=W/P*N;ξ=im*zeros(N);x=(bitreverse.(0:P-1).+2.0^63)/2.0^64;
+using FFTW,LinearAlgebra,Plots,SpecialFunctions;pic=()->(N=64;P=32N;dt=1/6N;
+T=2^12;W=32π^2/3;w=W/P*N;ξ=im*zeros(N);x=(bitreverse.(0:P-1).+2.0^63)/2.0^64;
 v=collect(1:P.>P/2).*2 .-1.;r=zeros(N);
 E=zeros(N);X=copy(x);V=copy(v);ik=2π*im*vcat(1,1:N/2,-N/2+1:-1);D=zeros(T,4);
 f(g,c)=erf((g-c)*N)/2;ff(i,c)=f((i+0.5)/N,c)-f((i-0.5)/N,c);l=4eps();
@@ -13,7 +13,9 @@ d(c)=((mod1(i,N),ff(i,c)) for i∈(-7:7).+Int(round(c*N)));F=copy(E);
  D[t,1:3].*=2/W;plot!((1:t)./T,D[1:t,:],legend=0==1,xlims=(0,1)); @show t/T
  plot!((0.5:N)/N,ρ(x[1:P÷2])./W,c=1);plot!((0.5:N)/N,ρ(x[P÷2+1:P])./W,c=2)
 end every 8;return (D,N,P,dt,T,W,w););(D,N,P,dt,T,W,w)=pic()
-plot((1:T).*dt,log10.(abs.(D[:,1])),label="electric field energy");yticks!(-30:0)
-plot!((1:T).*dt,log10.(abs.(1 .-D[:,3])),label="total energy change")
-plot!((1:T).*dt,log10.(abs.(D[:,4])),label="total momentum",legend=:bottomright)
-xlabel!("Time");ylabel!("Energy");savefig("GaussianFixedPointQuiet.pdf")
+la(x)=log10(abs(x));t=(1:T).*dt;plot(t,la.(D[:,1]),label="electric field energy")
+plot!(t,la.(1 .-D[:,3]),label="total energy change");yticks!(-35:1)
+plot!(t,la.(D[:,4]),label="total momentum",legend=:bottomright)
+γ(x)=imag(sqrt(Complex(x^2+1-sqrt(4*x^2+1))))*sqrt(W/2)/log(10);ylims!(-35,1)
+plot!(t,2*γ(2π/sqrt(W/2)).*(t.-T÷4*dt).+la.(D[T÷4,1]),label="predicted")
+xlabel!("Time");ylabel!("log 10");savefig("GaussianFixedPointQuiet.pdf")
