@@ -5,7 +5,7 @@ FFTW.set_num_threads(Threads.nthreads())
 function foo()
 
 NX=NY=256;P=NX*NY*16;T=2^17;NS=8;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
-n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/8vth;B0=sqrt(n0)/16;w=n0/P;
+n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/60vth;B0=sqrt(n0)/16;w=n0/P;
 @show NX, NY, P, T, TO, n0, vth, B0, dt
 igr(d) = 1 / Roots.find_zero(x->x^(d+1) - x - 1, 1.5)
 R(α, N, s0=0) = [rem(s0 + n * α, 1) for n in 1:N]
@@ -23,26 +23,41 @@ x=R(igr(1),P);y=R(igr(2),P);
 vx=vth * erfinv.(R(igr(3),P));
 vy=vth * erfinv.(R(igr(4),P));
 vz=vth * erfinv.(R(igr(5),P));
-phi=zeros(ComplexF64, NX, NY);Ex=similar(phi);Ey=similar(phi);
+phi=zeros(ComplexF64, NX, NY);Ex=zeros(ComplexF64,NX, NY);Ey=zeros(ComplexF64, NX, NY);
 ns=zeros(NX, NY, nthreads());
 kx=im.*2π*vcat(0:NX/2,-NX/2+1:-1);
 ky=im.*2π*vcat(0:NY/2,-NY/2+1:-1);
-INX = 1/NX
-INY = 1/NY
 
-@inline function g(z, NZ, INZ)
-  i = ceil(Int, z * NZ)
-  r = z + 1 - i * INZ
-  return ((i, r), (mod1(i-1, NZ), 1-r))
+@inline function g(z, NZ)
+  zNZ = z * NZ
+  i = mod1(ceil(Int, zNZ), NZ)
+  r = i - zNZ;
+  @assert 0 <= r <= 1
+  return ((i, 1-r), (mod1(i+1, NZ), r))# ((i, 0.5), (i, 0.5)) #
 end
 
-@inline function eval(F1, F2, x, y)
-  return @inbounds sum((@SArray [F1[i,j], F2[i,j]]) .* wx * wy
-    for (j, wy) in g(y, NY, INY), (i, wx) in g(x, NX, INX))
+
+@inline function eval(F1, F2, xi, yi)
+  output = sum((@SArray [real(F1[i,j]), real(F2[i,j])]) .* wx * wy
+    for (j, wy) in g(yi, NY), (i, wx) in g(xi, NX))
+  if !all(isfinite, output)
+    @show xi, yi
+    for k in 1:2
+      @show k
+      i, wx = g(xi, NX)[k]
+      j, wy = g(yi, NY)[k]
+      @show i, wx
+      @show j, wy
+      @show F1[i, j]
+      @show F2[i, j]
+    end
+  end
+  @assert all(isfinite, output)
+  return output
 end
 
 function deposit!(F, x, y, w)
-  @inbounds for (j, wy) in g(y, NY, INY), (i, wx) in g(x, NX, INX)
+  for (j, wy) in g(y, NY), (i, wx) in g(x, NX)
     F[i,j] += wx * wy * w
   end
 end
@@ -57,18 +72,20 @@ minvkk[1, 1] = 0
 chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
 
 for t in 1:T;
-  @inbounds @threads for j in 1:nthreads()
+  @threads for j in 1:nthreads()
     n = @view ns[:, :, threadid()]
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
-      vx[i], vy[i] = boris(vx[i], vy[i], vz[i], 0real(Exi), 0real(Eyi), B0, dt);
+      #@show i, x[i], y[i], vx[i], vy[i], vz[i], Exi, Eyi
+      vx[i], vy[i], vz[i] = boris(vx[i], vy[i], vz[i], Exi, Eyi, B0, dt);
       x[i] = mod(x[i] + vx[i]*dt,1)
       y[i] = mod(y[i] + vy[i]*dt,1)
+      #@show i, x[i], y[i], vx[i], vy[i], vz[i], Exi, Eyi
       deposit!(n, x[i], y[i], w)
     end
   end
   @threads for j in 1:size(phi, 2)
-    @inbounds for k in axes(phi, 3), i in axes(phi, 1)
+    for k in axes(phi, 3), i in axes(phi, 1)
       phi[i, j] += ns[i, j, k]
     end
   end
@@ -76,7 +93,7 @@ for t in 1:T;
   pfft * phi;
   @assert all(isfinite, phi)
   @threads for j in axes(phi, 2)
-    @inbounds for i in axes(phi, 1)
+    for i in axes(phi, 1)
       Ex[i, j] = phi[i, j] * kx[i] * minvkk[i, j]
       Ey[i, j] = phi[i, j] * ky[j] * minvkk[i, j]
       phi[i, j] = 0
@@ -86,6 +103,8 @@ for t in 1:T;
   hey = @spawn pifft * Ey;
   wait(hex)
   wait(hey)
+  #@assert all(isfinite, Ey)
+  #@assert all(isfinite, Ex)
   if t % NS == 0
     ti = (t ÷ NS)
     K[ti,1] = mean(((real.(Ex)).^2 .+ (real.(Ey)).^2))
@@ -113,17 +132,20 @@ heatmap(x, t, Eys[1,:,:]')
 xlabel!("Space [vth/Omega_c] ");ylabel!("Time [tau_c]")
 savefig("AreaElectrostatic2D3V_TY.png")
 filter = sin.(((1:size(Eys,3)) .- 0.5) ./ size(Eys,3) .* pi)'
-ws = 2π/(T * dt) .* (1:size(Eys,3)÷2) ./ (B0);
-kxs = 2π .* (1:NX÷2-1) ./ (B0/vth);
-kys = 2π .* (1:NY÷2-1) ./ (B0/vth);
-Zx = log10.(abs.(fft((Eys[:,1,:] .* filter)')))[1:end÷2, 2:end÷2];
-heatmap(kxs, ws, Zx)
+ws = 2π/(T * dt) .* (1:size(Eys,3)) ./ (B0);
+kxs = 2π .* (0:NX-1) ./ (B0/vth);
+kys = 2π .* (0:NY-1) ./ (B0/vth);
+Zx = log10.(abs.(fft((Eys[:,1,:] .* filter)')))
+heatmap(kxs[1:end÷2], ws[1:200], Zx[1:end÷2, 2:200])
 xlabel!("Wavenumber");ylabel!("Frequency")
 savefig("AreaElectrostatic2D3V_WKx.png")
 Zy = log10.(abs.(fft((Eys[:,1,:] .* filter)')))[1:end÷2, 2:end÷2];
-heatmap(kxs, ws, Zy)
+heatmap(kys[1:end÷2], ws[1:200], Zy[1:end÷2, 2:200])
 xlabel!("Wavenumber");ylabel!("Frequency")
 savefig("AreaElectrostatic2D3V_WKy.png")
+
+heatmap(kxs[2:end÷2-1], ws[1:200], log10.(abs.(sum(i->abs.(fft(Eys[:, i, :])), 1:size(Eys, 2))))[2:end÷2-1, 1:200]')
+
 end
 # heatmap(kxs[1:end], ws, log10.(abs.(sum(i->abs.(fft(Exs[:, i, :])), 1:size(Eys, 2))))[1:end÷2-1, 1:end÷2]')
 #
