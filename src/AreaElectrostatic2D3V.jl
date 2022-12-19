@@ -1,17 +1,19 @@
 using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Roots
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
+using ProgressMeter
 FFTW.set_num_threads(Threads.nthreads())
 
 function foo()
 
-NX=NY=256;P=NX*NY*16;T=2^17;NS=8;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
-n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/60vth;B0=sqrt(n0)/16;w=n0/P;
+NX=NY=256;P=NX*NY*64;T=2^17;NS=8;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
+n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/6vth;B0=sqrt(n0)/16;w=n0/P;
+Δ=1/NG;Δx=1/NX;Δy=1/NY
 @show NX, NY, P, T, TO, n0, vth, B0, dt
+@show vth * dt / Δ, vth / B0 / Δy
 igr(d) = 1 / Roots.find_zero(x->x^(d+1) - x - 1, 1.5)
-R(α, N, s0=0) = [rem(s0 + n * α, 1) for n in 1:N]
+R(α, N, s0=0) = rand(N);#[rem(s0 + n * α, 1) for n in 1:N]
 
 function boris(vx, vy, vz, Ex, Ey, B, dt)
-#  return (vx + Ex * dt/2, vy + Ey * dt/2, vz)
   v⁻ = @SArray [vx + Ex * dt/2, vy + Ey * dt/2, vz]
   t = @SArray [B * dt/2, 0, 0]
   v⁺ = v⁻ + 2 * cross(v⁻ + cross(v⁻, t), t) / (1 + dot(t, t))
@@ -36,23 +38,9 @@ ky=im.*2π*vcat(0:NY/2,-NY/2+1:-1);
   return ((i, 1-r), (mod1(i+1, NZ), r))# ((i, 0.5), (i, 0.5)) #
 end
 
-
 @inline function eval(F1, F2, xi, yi)
   output = sum((@SArray [real(F1[i,j]), real(F2[i,j])]) .* wx * wy
     for (j, wy) in g(yi, NY), (i, wx) in g(xi, NX))
-  if !all(isfinite, output)
-    @show xi, yi
-    for k in 1:2
-      @show k
-      i, wx = g(xi, NX)[k]
-      j, wy = g(yi, NY)[k]
-      @show i, wx
-      @show j, wy
-      @show F1[i, j]
-      @show F2[i, j]
-    end
-  end
-  @assert all(isfinite, output)
   return output
 end
 
@@ -71,16 +59,14 @@ minvkk[1, 1] = 0
 
 chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
 
-for t in 1:T;
+@showprogress 1 for t in 1:T;
   @threads for j in 1:nthreads()
     n = @view ns[:, :, threadid()]
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
-      #@show i, x[i], y[i], vx[i], vy[i], vz[i], Exi, Eyi
       vx[i], vy[i], vz[i] = boris(vx[i], vy[i], vz[i], Exi, Eyi, B0, dt);
       x[i] = mod(x[i] + vx[i]*dt,1)
       y[i] = mod(y[i] + vy[i]*dt,1)
-      #@show i, x[i], y[i], vx[i], vy[i], vz[i], Exi, Eyi
       deposit!(n, x[i], y[i], w)
     end
   end
@@ -103,13 +89,11 @@ for t in 1:T;
   hey = @spawn pifft * Ey;
   wait(hex)
   wait(hey)
-  #@assert all(isfinite, Ey)
-  #@assert all(isfinite, Ex)
   if t % NS == 0
     ti = (t ÷ NS)
     K[ti,1] = mean(((real.(Ex)).^2 .+ (real.(Ey)).^2))
     K[ti,2] = sum((vx.^2 + vy.^2).*w);
-    @show ti, TO, K[ti, 1:2]
+#    @show ti, TO, K[ti, 1:2]
     K[ti,3]=sum(K[ti,1:2]);
     K[ti,4]=sum(vx)/P;
     K[ti,5]=sum(vy)/P;
@@ -135,16 +119,25 @@ filter = sin.(((1:size(Eys,3)) .- 0.5) ./ size(Eys,3) .* pi)'
 ws = 2π/(T * dt) .* (1:size(Eys,3)) ./ (B0);
 kxs = 2π .* (0:NX-1) ./ (B0/vth);
 kys = 2π .* (0:NY-1) ./ (B0/vth);
-Zx = log10.(abs.(fft((Eys[:,1,:] .* filter)')))
-heatmap(kxs[1:end÷2], ws[1:200], Zx[1:end÷2, 2:200])
+Zx = log10.(abs.(fft((Eys[:,1,:] .* filter)')))'
+heatmap(kxs[1:end÷2], ws[2:end÷2], Zx[1:end÷2, 2:end÷2])
 xlabel!("Wavenumber");ylabel!("Frequency")
 savefig("AreaElectrostatic2D3V_WKx.png")
-Zy = log10.(abs.(fft((Eys[:,1,:] .* filter)')))[1:end÷2, 2:end÷2];
-heatmap(kys[1:end÷2], ws[1:200], Zy[1:end÷2, 2:200])
+Zy = log10.(abs.(fft((Eys[:,1,:] .* filter)')))'
+heatmap(kys[1:end÷2], ws[2:end÷2], Zy[1:end÷2, 2:end÷2])
 xlabel!("Wavenumber");ylabel!("Frequency")
 savefig("AreaElectrostatic2D3V_WKy.png")
 
-heatmap(kxs[2:end÷2-1], ws[1:200], log10.(abs.(sum(i->abs.(fft(Eys[:, i, :])), 1:size(Eys, 2))))[2:end÷2-1, 1:200]')
+for (F, FS) in ((Exs, "Ex"), (Eys, "Ey"))
+  heatmap(kxs[2:end÷2-1], ws[1:200],
+    log10.(abs.(sum(i->abs.(fft(F[:, i, :])), 1:size(F, 2))))[2:end÷2-1, 1:200]')
+  xlabel!("Wavenumber");ylabel!("Frequency")
+  savefig("AreaElectrostatic2D3V_$(FS)_WKsumy.png")
+  heatmap(kxs[2:end÷2-1], ws[1:200],
+    log10.(abs.(sum(i->abs.(fft(F[i, :, :])), 1:size(F, 1))))[2:end÷2-1, 1:200]')
+  xlabel!("Wavenumber");ylabel!("Frequency")
+  savefig("AreaElectrostatic2D3V_$(FS)_WKsumx.png")
+end
 
 end
 # heatmap(kxs[1:end], ws, log10.(abs.(sum(i->abs.(fft(Exs[:, i, :])), 1:size(Eys, 2))))[1:end÷2-1, 1:end÷2]')
