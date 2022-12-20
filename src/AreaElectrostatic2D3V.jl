@@ -2,6 +2,7 @@ using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Roots
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter
 FFTW.set_num_threads(Threads.nthreads())
+Plots.gr()
 
 function foo()
 
@@ -68,11 +69,12 @@ minvkk[1, 1] = 0
 @assert all(isfinite, minvkk)
 
 chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
+@assert maximum(maximum.(chunks)) == P
 
 @showprogress 1 for t in 1:T;
   hphi0 = @spawn @inbounds @threads for i in eachindex(phi); phi[i] = 0;end
   @threads for j in 1:nthreads()
-    n = @view ns[:, :, threadid()]
+    n = @view ns[:, :, j]
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
       vx[i], vy[i], vz[i] = boris(vx[i], vy[i], vz[i], Exi, Eyi, B0, dt);
@@ -89,9 +91,10 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
   end
   hns0 = @spawn @tturbo @. ns = 0 # faster outside loop above
   pfft * phi;
-  @assert all(isfinite, phi)
   @threads for j in axes(phi, 2)
     for i in axes(phi, 1)
+      phiij = phi[i, j]
+      @assert isfinite(phiij)
       Ex[i, j] = phi[i, j] * kx[i] * minvkk[i, j]
       Ey[i, j] = phi[i, j] * ky[j] * minvkk[i, j]
     end
