@@ -30,8 +30,8 @@ x=R(igr(1),P);y=R(igr(2),P);
 vx=vth * erfinv.(R(igr(3),P));
 vy=vth * erfinv.(R(igr(4),P));
 vz=vth * erfinv.(R(igr(5),P));
-th=2pi.*rand(P)
-vx[1:P÷10] .= 0
+#th=2pi.*rand(P)
+#vx[1:P÷10] .= 0
 #vy[1:P÷10] = 3*vth * sin.(th[1:P÷10])
 #vz[1:P÷10] = 3*vth * cos.(th[1:P÷10])
 phi=zeros(ComplexF64, NX, NY);
@@ -70,10 +70,11 @@ minvkk[1, 1] = 0
 
 chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
 @assert maximum(maximum.(chunks)) == P
+@assert length(chunks) == size(ns, 3)
 
 @showprogress 1 for t in 1:T;
   hphi0 = @spawn @inbounds @threads for i in eachindex(phi); phi[i] = 0;end
-  @threads for j in 1:nthreads()
+  @threads for j in axes(ns, 3)
     n = @view ns[:, :, j]
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
