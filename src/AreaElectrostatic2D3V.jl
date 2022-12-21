@@ -1,12 +1,23 @@
-using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Roots
+using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
-using ProgressMeter
+using ProgressMeter, LaTeXStrings
 FFTW.set_num_threads(Threads.nthreads())
 Plots.gr()
+function halton(i, base, seed=0.0)
+  result, f = 0.0, 1.0
+  while i > 0
+    f = f / base;
+    result += f * mod(i, base)
+    i ÷= base;
+  end
+  return mod(result + seed, 1)
+end
 
 function foo()
-
-NX=128;NY=128;P=NX*NY*16;T=2^14;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
+sq = 2 * 3 * 5 * 7 * 11
+NX=256;NY=256;
+NP1 = ceil(Int, NX * NY/(2*3*5*7*11)) * (2*3*5*7*11)
+P=NX*NY*16;T=2^15;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
 n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/8;w=n0/P;
 Δ=1/NG;Δx=1/NX;Δy=1/NY
 @show NX, NY, P, T, TO, NS, n0, vth, B0, dt
@@ -14,8 +25,6 @@ n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/8;w=n0/P;
 @show 2pi/sqrt(n0) / dt, 2pi/B0 / dt
 @show T * dt / (2pi/sqrt(n0)), T * dt / (2pi/B0)
 @show 2 * pi^2 * (vth/B0)^2
-igr(d) = 1 / Roots.find_zero(x->x^(d+1) - x - 1, 1.5)
-R(α, N, s0=0) = rand(N);#[rem(s0 + n * α, 1) for n in 1:N]
 
 function boris(vx, vy, vz, Ex, Ey, B, dt)
   v⁻ = @SArray [vx + Ex * dt/2, vy + Ey * dt/2, vz]
@@ -26,14 +35,15 @@ end
 
 K=zeros(TO,5); Exs=zeros(NX,NY,TO);
 Eys=zeros(NX,NY,TO); phis=zeros(NX,NY,TO);
-x=R(igr(1),P);y=R(igr(2),P);
-vx=vth * erfinv.(R(igr(3),P));
-vy=vth * erfinv.(R(igr(4),P));
-vz=vth * erfinv.(R(igr(5),P));
-#th=2pi.*rand(P)
+x=rand(P);#halton.(0:P-1, 2, 1/sqrt(2));#rand(P);
+y=rand(P);#halton.(0:P-1, 3, 1/sqrt(2));#rand(P);
+vx=vth * rand(P);#erfinv.(halton.(0:P-1, 5, 1/sqrt(2)));#rand(P));
+vy=vth * rand(P);#erfinv.(halton.(0:P-1, 7, 1/sqrt(2)));#rand(P));
+vz=vth * rand(P);#erfinv.(halton.(0:P-1, 11, 1/sqrt(2)));#rand(P));
+#th=2pi.*rand(P÷10)
 #vx[1:P÷10] .= 0
-#vy[1:P÷10] = 3*vth * sin.(th[1:P÷10])
-#vz[1:P÷10] = 3*vth * cos.(th[1:P÷10])
+#vy[1:P÷10] = 4*vth * sin.(th)
+#vz[1:P÷10] = 4*vth * cos.(th)
 phi=zeros(ComplexF64, NX, NY);
 Ex=zeros(ComplexF64,NX, NY);
 Ey=zeros(ComplexF64, NX, NY);
@@ -74,7 +84,7 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
 
 @showprogress 1 for t in 1:T;
   hphi0 = @spawn @inbounds @threads for i in eachindex(phi); phi[i] = 0;end
-  @threads for j in axes(ns, 3)
+  hparticles = @spawn @threads for j in axes(ns, 3)
     n = @view ns[:, :, j]
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
@@ -85,6 +95,7 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
     end
   end
   wait(hphi0)
+  wait(hparticles)
   @threads for j in 1:size(phi, 2)
     for k in axes(phi, 3), i in axes(phi, 1)
       phi[i, j] += ns[i, j, k]
@@ -102,9 +113,9 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
   end
   hex = @spawn pifft * Ex;
   hey = @spawn pifft * Ey;
+  wait(hns0)
   wait(hex)
   wait(hey)
-  wait(hns0)
   if t % NS == 0
     ti = (t ÷ NS)
     K[ti,1] = mean(((real.(Ex)).^2 .+ (real.(Ey)).^2))
@@ -135,16 +146,18 @@ filter = sin.(((1:size(Eys,3)) .- 0.5) ./ size(Eys,3) .* pi)'
 ws = 2π/(T * dt) .* (1:size(Eys,3)) ./ (B0);
 kxs = 2π .* (0:NX-1) ./ (B0/vth);
 kys = 2π .* (0:NY-1) ./ (B0/vth);
-wind = findlast(ws .< 5.1);
+wind = findlast(ws .< max(5.1, 1.1 *sqrt(n0)/B0));
 
 @views for (F, FS) in ((Exs, "Ex"), (Eys, "Ey"), (phis, "phi"))
   heatmap(kxs[2:end÷2-1], ws[1:wind],
     log10.(sum(i->abs.(fft(F[:, i, :])[2:end÷2-1, 1:wind]'), 1:size(F, 2))))
-  xlabel!("Wavenumber");ylabel!("Frequency")
+  xlabel!(L"Wavenumber $[\Omega_c / v_{th}]$");
+  ylabel!(L"Frequency $[\Omega_c]$")
   savefig("AreaElectrostatic2D3V_$(FS)_WKsumy.png")
   heatmap(kys[2:end÷2-1], ws[1:wind],
     log10.(sum(i->abs.(fft(F[i, :, :])[2:end÷2-1, 1:wind]'), 1:size(F, 1))))
-  xlabel!("Wavenumber");ylabel!("Frequency")
+  xlabel!(L"Wavenumber $[\Omega_c / v_{th}]$");
+  ylabel!(L"Frequency $[\Omega_c]$")
   savefig("AreaElectrostatic2D3V_$(FS)_WKsumx.png")
 end
 
