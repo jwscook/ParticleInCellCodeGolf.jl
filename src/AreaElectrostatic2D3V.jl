@@ -15,14 +15,14 @@ end
 
 function foo()
 sq = 2 * 3 * 5 * 7 * 11
-NX=256;NY=256;
+NX=NY=2^8;
 NP1 = ceil(Int, NX * NY/(2*3*5*7*11)) * (2*3*5*7*11)
-P=NX*NY*16;T=2^15;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
-n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/8;w=n0/P;
+P=NX*NY*2^7;T=2^13;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
+n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/4;w=n0/P;
 Δ=1/NG;Δx=1/NX;Δy=1/NY
 @show NX, NY, P, T, TO, NS, n0, vth, B0, dt
 @show vth * dt / Δ, vth / B0 / Δy
-@show 2pi/sqrt(n0) / dt, 2pi/B0 / dt
+@show 2pi/sqrt(n0) / (NS * dt), 2pi/B0 / (NS * dt)
 @show T * dt / (2pi/sqrt(n0)), T * dt / (2pi/B0)
 @show 2 * pi^2 * (vth/B0)^2
 
@@ -51,18 +51,24 @@ ns=zeros(NX, NY, nthreads());
 kx=im.*2π*vcat(0:NX/2,-NX/2+1:-1);
 ky=im.*2π*vcat(0:NY/2,-NY/2+1:-1);
 
+mymod1(x, n) = 1 <= x <= n ? x : x < 1 ? x + n : x - n
+mymod(x, n) = 0 < x <= n ? x : x < 0 ? x + n : x - n #mymod(x + n, n) : mymod(x - n, n)
 @inline function g(z, NZ)
   zNZ = z * NZ
-  i = mod1(ceil(Int, zNZ), NZ)
+  i = mymod1(ceil(Int, zNZ), NZ)
   r = i - zNZ;
   @assert 0 <= r <= 1
-  return ((i, 1-r), (mod1(i+1, NZ), r))# ((i, 0.5), (i, 0.5)) #
+  return ((i, 1-r), (mymod1(i+1, NZ), r))# ((i, 0.5), (i, 0.5)) #
 end
 
 @inline function eval(F1, F2, xi, yi)
-  output = sum((@SArray [real(F1[i,j]), real(F2[i,j])]) .* wx * wy
-    for (j, wy) in g(yi, NY), (i, wx) in g(xi, NX))
-  return output
+  F1o = zero(eltype(F1))
+  F2o = zero(eltype(F2))
+  for (j, wy) in g(yi, NY), (i, wx) in g(xi, NX)
+    F1o += real(F1[i,j]) * wx * wy
+    F2o += real(F2[i,j]) * wx * wy
+  end
+  return (F1o, F2o)
 end
 
 function deposit!(F, x, y, w)
@@ -89,8 +95,10 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
       vx[i], vy[i], vz[i] = boris(vx[i], vy[i], vz[i], Exi, Eyi, B0, dt);
-      x[i] = mod(x[i] + vx[i]*dt,1)
-      y[i] = mod(y[i] + vy[i]*dt,1)
+      x[i] = mymod(x[i] + vx[i]*dt,1)
+      y[i] = mymod(y[i] + vy[i]*dt,1)
+      @assert 0 < x[i] <= 1
+      @assert 0 < y[i] <= 1
       deposit!(n, x[i], y[i], w)
     end
   end
@@ -146,7 +154,7 @@ filter = sin.(((1:size(Eys,3)) .- 0.5) ./ size(Eys,3) .* pi)'
 ws = 2π/(T * dt) .* (1:size(Eys,3)) ./ (B0);
 kxs = 2π .* (0:NX-1) ./ (B0/vth);
 kys = 2π .* (0:NY-1) ./ (B0/vth);
-wind = findlast(ws .< max(5.1, 1.1 *sqrt(n0)/B0));
+wind = length(ws)÷2#findlast(ws .< max(5.1, 1.1 *sqrt(n0)/B0));
 
 @views for (F, FS) in ((Exs, "Ex"), (Eys, "Ey"), (phis, "phi"))
   heatmap(kxs[2:end÷2-1], ws[1:wind],
