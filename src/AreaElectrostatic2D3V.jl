@@ -1,6 +1,8 @@
 using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
-using ProgressMeter, LaTeXStrings
+using ProgressMeter, LaTeXStrings, OffsetArrays, StructArrays
+
+TurboArray(x) = StructArray(OffsetArray(x, zeros(Int, length(size(x)))...))
 FFTW.set_num_threads(Threads.nthreads())
 Plots.gr()
 function halton(i, base, seed=0.0)
@@ -17,7 +19,7 @@ function foo()
 sq = 2 * 3 * 5 * 7 * 11
 NX=NY=2^8;
 NP1 = ceil(Int, NX * NY/(2*3*5*7*11)) * (2*3*5*7*11)
-P=NX*NY*2^7;T=2^13;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
+P=NX*NY*2^3;T=2^14;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
 n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/4;w=n0/P;
 Δ=1/NG;Δx=1/NX;Δy=1/NY
 @show NX, NY, P, T, TO, NS, n0, vth, B0, dt
@@ -26,30 +28,31 @@ n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/4;w=n0/P;
 @show T * dt / (2pi/sqrt(n0)), T * dt / (2pi/B0)
 @show 2 * pi^2 * (vth/B0)^2
 
-function boris(vx, vy, vz, Ex, Ey, B, dt)
+t = @SArray [B0 * dt/2, 0, 0]
+tscale = 2 / (1 + dot(t, t))
+function boris(vx, vy, vz, Ex, Ey, dt)
   v⁻ = @SArray [vx + Ex * dt/2, vy + Ey * dt/2, vz]
-  t = @SArray [B * dt/2, 0, 0]
-  v⁺ = v⁻ + 2 * cross(v⁻ + cross(v⁻, t), t) / (1 + dot(t, t))
+  v⁺ = v⁻ + cross(v⁻ + cross(v⁻, t), t) * tscale
   return (v⁺[1] + Ex * dt/2, v⁺[2] + Ey * dt/2, v⁺[3])
 end
 
 K=zeros(TO,5); Exs=zeros(NX,NY,TO);
 Eys=zeros(NX,NY,TO); phis=zeros(NX,NY,TO);
-x=rand(P);#halton.(0:P-1, 2, 1/sqrt(2));#rand(P);
-y=rand(P);#halton.(0:P-1, 3, 1/sqrt(2));#rand(P);
-vx=vth * rand(P);#erfinv.(halton.(0:P-1, 5, 1/sqrt(2)));#rand(P));
-vy=vth * rand(P);#erfinv.(halton.(0:P-1, 7, 1/sqrt(2)));#rand(P));
-vz=vth * rand(P);#erfinv.(halton.(0:P-1, 11, 1/sqrt(2)));#rand(P));
+x  =       rand(P);#        halton.(0:P-1, 2, 1/sqrt(2));#rand(P);
+y  =       rand(P);#        halton.(0:P-1, 3, 1/sqrt(2));#rand(P);
+vx = vth * rand(P);#erfinv.(halton.(0:P-1, 5, 1/sqrt(2)));#rand(P));
+vy = vth * rand(P);#erfinv.(halton.(0:P-1, 7, 1/sqrt(2)));#rand(P));
+vz = vth * rand(P);#erfinv.(halton.(0:P-1, 11, 1/sqrt(2)));#rand(P));
 #th=2pi.*rand(P÷10)
 #vx[1:P÷10] .= 0
 #vy[1:P÷10] = 4*vth * sin.(th)
 #vz[1:P÷10] = 4*vth * cos.(th)
-phi=zeros(ComplexF64, NX, NY);
-Ex=zeros(ComplexF64,NX, NY);
-Ey=zeros(ComplexF64, NX, NY);
+phi=TurboArray(zeros(ComplexF64, NX, NY));
+Ex=TurboArray(zeros(ComplexF64,NX, NY));
+Ey=TurboArray(zeros(ComplexF64, NX, NY));
+kx=TurboArray(im .* 2π*vcat(0:NX/2,-NX/2+1:-1));
+ky=TurboArray(im .* 2π*vcat(0:NY/2,-NY/2+1:-1));
 ns=zeros(NX, NY, nthreads());
-kx=im.*2π*vcat(0:NX/2,-NX/2+1:-1);
-ky=im.*2π*vcat(0:NY/2,-NY/2+1:-1);
 
 mymod1(x, n) = 1 <= x <= n ? x : x < 1 ? x + n : x - n
 mymod(x, n) = 0 < x <= n ? x : x < 0 ? x + n : x - n #mymod(x + n, n) : mymod(x - n, n)
@@ -80,21 +83,23 @@ end
 pfft = plan_fft!(phi; flags=FFTW.ESTIMATE, timelimit=Inf)
 pifft = plan_ifft!(phi; flags=FFTW.ESTIMATE, timelimit=Inf)
 
-minvkk = -1 ./ (kx.^2 .+ (ky').^2)
+minvkk = real.(-1 ./ (kx.^2 .+ (ky').^2))
 minvkk[1, 1] = 0
 @assert all(isfinite, minvkk)
 
 chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
 @assert maximum(maximum.(chunks)) == P
+@show length(chunks), size(ns)
 @assert length(chunks) == size(ns, 3)
 
 @showprogress 1 for t in 1:T;
-  hphi0 = @spawn @inbounds @threads for i in eachindex(phi); phi[i] = 0;end
+  hphi0 = @spawn @tturbo for i in eachindex(phi); phi.re[i] = 0.0; phi.im[i] = 0.0;end
+  #hphi0 = @spawn @inbounds @threads for i in eachindex(phi); phi[i] = 0;end
   hparticles = @spawn @threads for j in axes(ns, 3)
     n = @view ns[:, :, j]
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
-      vx[i], vy[i], vz[i] = boris(vx[i], vy[i], vz[i], Exi, Eyi, B0, dt);
+      vx[i], vy[i], vz[i] = boris(vx[i], vy[i], vz[i], Exi, Eyi, dt);
       x[i] = mymod(x[i] + vx[i]*dt,1)
       y[i] = mymod(y[i] + vy[i]*dt,1)
       @assert 0 < x[i] <= 1
@@ -109,16 +114,23 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
       phi[i, j] += ns[i, j, k]
     end
   end
-  hns0 = @spawn @tturbo @. ns = 0 # faster outside loop above
+  hns0 = @spawn @tturbo @. ns = zero(eltype(ns)) # faster outside loop above
   pfft * phi;
-  @threads for j in axes(phi, 2)
-    for i in axes(phi, 1)
-      phiij = phi[i, j]
-      @assert isfinite(phiij)
-      Ex[i, j] = phi[i, j] * kx[i] * minvkk[i, j]
-      Ey[i, j] = phi[i, j] * ky[j] * minvkk[i, j]
-    end
+  @tturbo for ij in CartesianIndices((NX, NY))
+    i, j = Tuple(ij)
+    #Ex.re[i, j] = - phi.im[i, j] * kx.im[i] * minvkk[i, j]
+    #Ex.im[i, j] =   phi.re[i, j] * kx.im[i] * minvkk[i, j]
+    #Ey.re[i, j] = - phi.im[i, j] * ky.im[j] * minvkk[i, j]
+    #Ey.im[i, j] =   phi.re[i, j] * ky.im[j] * minvkk[i, j]
   end
+  #@threads for j in axes(phi, 2)
+  #  for i in axes(phi, 1)
+  #    phiij = phi[i, j]
+  #    @assert isfinite(phiij)
+  #    Ex[i, j] = phi[i, j] * kx[i] * minvkk[i, j]
+  #    Ey[i, j] = phi[i, j] * ky[j] * minvkk[i, j]
+  #  end
+  #end
   hex = @spawn pifft * Ex;
   hey = @spawn pifft * Ey;
   wait(hns0)
