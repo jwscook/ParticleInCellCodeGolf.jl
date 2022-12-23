@@ -1,10 +1,11 @@
-using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra
+using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Random
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, OffsetArrays, StructArrays
 
 TurboArray(x) = StructArray(OffsetArray(x, zeros(Int, length(size(x)))...))
 FFTW.set_num_threads(Threads.nthreads())
 Plots.gr()
+Random.seed!(0)
 function halton(i, base, seed=0.0)
   result, f = 0.0, 1.0
   while i > 0
@@ -17,7 +18,7 @@ end
 
 function foo()
 sq = 2 * 3 * 5 * 7 * 11
-NX=NY=2^8;
+NX=NY=64;
 NP1 = ceil(Int, NX * NY/(2*3*5*7*11)) * (2*3*5*7*11)
 P=NX*NY*2^3;T=2^14;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
 n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/4;w=n0/P;
@@ -68,8 +69,9 @@ end
   F1o = zero(eltype(F1))
   F2o = zero(eltype(F2))
   for (j, wy) in g(yi, NY), (i, wx) in g(xi, NX)
-    F1o += real(F1[i,j]) * wx * wy
-    F2o += real(F2[i,j]) * wx * wy
+    wxy = wx * wy
+    F1o += real(F1[i,j]) * wxy
+    F2o += real(F2[i,j]) * wxy
   end
   return (F1o, F2o)
 end
@@ -116,27 +118,34 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
   end
   hns0 = @spawn @tturbo @. ns = zero(eltype(ns)) # faster outside loop above
   pfft * phi;
-  @tturbo for ij in CartesianIndices((NX, NY))
-    i, j = Tuple(ij)
-    #Ex.re[i, j] = - phi.im[i, j] * kx.im[i] * minvkk[i, j]
-    #Ex.im[i, j] =   phi.re[i, j] * kx.im[i] * minvkk[i, j]
-    #Ey.re[i, j] = - phi.im[i, j] * ky.im[j] * minvkk[i, j]
-    #Ey.im[i, j] =   phi.re[i, j] * ky.im[j] * minvkk[i, j]
-  end
-  #@threads for j in axes(phi, 2)
-  #  for i in axes(phi, 1)
-  #    phiij = phi[i, j]
-  #    @assert isfinite(phiij)
-  #    Ex[i, j] = phi[i, j] * kx[i] * minvkk[i, j]
-  #    Ey[i, j] = phi[i, j] * ky[j] * minvkk[i, j]
+  @show t
+  #begin
+  #  @tturbo for j in axes(Ex, 2), i in axes(Ex, 1)
+  #    Ex.re[i, j] = - phi.im[i, j] * kx.im[i] * minvkk[i, j]
+  #    Ex.im[i, j] =   phi.re[i, j] * kx.im[i] * minvkk[i, j]
+  #    Ey.re[i, j] = - phi.im[i, j] * ky.im[j] * minvkk[i, j]
+  #    Ey.im[i, j] =   phi.re[i, j] * ky.im[j] * minvkk[i, j]
   #  end
   #end
+  @threads for j in axes(phi, 2)
+    for i in axes(phi, 1)
+      phiij = phi[i, j]
+      @assert isfinite(phiij)
+      Ex[i, j] = phi[i, j] * kx[i] * minvkk[i, j]
+      Ey[i, j] = phi[i, j] * ky[j] * minvkk[i, j]
+    end
+  end
+  @show Ex[2, 2]
+  @show Ex[3, 3]
   hex = @spawn pifft * Ex;
   hey = @spawn pifft * Ey;
   wait(hns0)
   wait(hex)
   wait(hey)
+  @show Ex[4, 4]
+  @show Ey[5, 5]
   if t % NS == 0
+    t > 0 && throw(error("sadfashfsgafewa"))
     ti = (t ÷ NS)
     K[ti,1] = mean(((real.(Ex)).^2 .+ (real.(Ey)).^2))
     K[ti,2] = sum((vx.^2 + vy.^2).*w);
