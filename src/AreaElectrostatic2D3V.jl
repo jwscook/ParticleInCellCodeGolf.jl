@@ -1,8 +1,9 @@
 using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Random
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, OffsetArrays, StructArrays
-
-TurboArray(x) = StructArray(OffsetArray(x, zeros(Int, length(size(x)))...))
+doturbo = try; parse(Bool, ARGS[1]);catch; true; end
+SOArray(x) = StructArray(OffsetArray(x,zeros(Int, length(size(x)))...))
+TurboArray(x) = doturbo ? SOArray(x) : x
 FFTW.set_num_threads(Threads.nthreads())
 Plots.gr()
 Random.seed!(0)
@@ -19,9 +20,9 @@ end
 function foo()
 sq = 2 * 3 * 5 * 7 * 11
 NX=NY=64;
-NP1 = ceil(Int, NX * NY/(2*3*5*7*11)) * (2*3*5*7*11)
-P=NX*NY*2^3;T=2^14;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
-n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/4;w=n0/P;
+NP1 = ceil(Int, NX * NY/sq) * sq
+P=NX*NY*2^4;T=2^15;NS=16;TO=T÷NS;NG=sqrt(NX^2 + NY^2)
+n0=4*pi^2;vth=sqrt(n0)/NG;dt=1/NG/10vth;B0=sqrt(n0)/8;w=n0/P;
 Δ=1/NG;Δx=1/NX;Δy=1/NY
 @show NX, NY, P, T, TO, NS, n0, vth, B0, dt
 @show vth * dt / Δ, vth / B0 / Δy
@@ -51,9 +52,14 @@ vz = vth * rand(P);#erfinv.(halton.(0:P-1, 11, 1/sqrt(2)));#rand(P));
 phi=TurboArray(zeros(ComplexF64, NX, NY));
 Ex=TurboArray(zeros(ComplexF64,NX, NY));
 Ey=TurboArray(zeros(ComplexF64, NX, NY));
-kx=TurboArray(im .* 2π*vcat(0:NX/2,-NX/2+1:-1));
-ky=TurboArray(im .* 2π*vcat(0:NY/2,-NY/2+1:-1));
-ns=zeros(NX, NY, nthreads());
+kx=TurboArray(im * 2π*vcat(0:NX/2,-NX/2+1:-1));
+ky=TurboArray(im * 2π*vcat(0:NY/2,-NY/2+1:-1));
+ns=zeros(NX, NY, nthreads())
+
+minvkk = real.(-1 ./ (kx.^2 .+ (ky').^2))
+minvkk[1, 1] = 0
+@assert all(isfinite, minvkk)
+
 
 mymod1(x, n) = 1 <= x <= n ? x : x < 1 ? x + n : x - n
 mymod(x, n) = 0 < x <= n ? x : x < 0 ? x + n : x - n #mymod(x + n, n) : mymod(x - n, n)
@@ -76,7 +82,7 @@ end
   return (F1o, F2o)
 end
 
-function deposit!(F, x, y, w)
+function depositcharge!(F, x, y, w)
   for (j, wy) in g(y, NY), (i, wx) in g(x, NX)
     F[i,j] += wx * wy * w
   end
@@ -85,19 +91,23 @@ end
 pfft = plan_fft!(phi; flags=FFTW.ESTIMATE, timelimit=Inf)
 pifft = plan_ifft!(phi; flags=FFTW.ESTIMATE, timelimit=Inf)
 
-minvkk = real.(-1 ./ (kx.^2 .+ (ky').^2))
-minvkk[1, 1] = 0
-@assert all(isfinite, minvkk)
-
 chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
 @assert maximum(maximum.(chunks)) == P
-@show length(chunks), size(ns)
+@show size(ns, 3)
+@show length(chunks)
 @assert length(chunks) == size(ns, 3)
+t1 = t2 = t3 = t4 = t5 = 0.0
+t3b = 0.0
 
 @showprogress 1 for t in 1:T;
-  hphi0 = @spawn @tturbo for i in eachindex(phi); phi.re[i] = 0.0; phi.im[i] = 0.0;end
-  #hphi0 = @spawn @inbounds @threads for i in eachindex(phi); phi[i] = 0;end
-  hparticles = @spawn @threads for j in axes(ns, 3)
+  #hphi0 = @spawn if doturbo
+  t1 += @elapsed if doturbo
+    @tturbo for i in eachindex(phi);phi.re[i]=0.;phi.im[i]=0.;end
+  else
+    @inbounds @threads for i in eachindex(phi); phi[i] = 0;end
+  end
+  #hparticles = @spawn @threads for j in axes(ns, 3)
+  t2 += @elapsed @threads for j in axes(ns, 3)
     n = @view ns[:, :, j]
     for i in chunks[j]
       Exi, Eyi = eval(Ex, Ey, x[i], y[i])
@@ -106,46 +116,56 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
       y[i] = mymod(y[i] + vy[i]*dt,1)
       @assert 0 < x[i] <= 1
       @assert 0 < y[i] <= 1
-      deposit!(n, x[i], y[i], w)
+      depositcharge!(n, x[i], y[i], w)
     end
   end
-  wait(hphi0)
-  wait(hparticles)
-  @threads for j in 1:size(phi, 2)
-    for k in axes(phi, 3), i in axes(phi, 1)
+  #wait(hphi0)
+  #wait(hparticles)
+  t3 += @elapsed @threads for j in 1:size(phi, 2)
+    for k in axes(ns, 3), i in axes(phi, 1)
       phi[i, j] += ns[i, j, k]
     end
   end
-  hns0 = @spawn @tturbo @. ns = zero(eltype(ns)) # faster outside loop above
-  pfft * phi;
-  @show t
-  #begin
-  #  @tturbo for j in axes(Ex, 2), i in axes(Ex, 1)
-  #    Ex.re[i, j] = - phi.im[i, j] * kx.im[i] * minvkk[i, j]
-  #    Ex.im[i, j] =   phi.re[i, j] * kx.im[i] * minvkk[i, j]
-  #    Ey.re[i, j] = - phi.im[i, j] * ky.im[j] * minvkk[i, j]
-  #    Ey.im[i, j] =   phi.re[i, j] * ky.im[j] * minvkk[i, j]
-  #  end
-  #end
-  @threads for j in axes(phi, 2)
-    for i in axes(phi, 1)
-      phiij = phi[i, j]
-      @assert isfinite(phiij)
-      Ex[i, j] = phi[i, j] * kx[i] * minvkk[i, j]
-      Ey[i, j] = phi[i, j] * ky[j] * minvkk[i, j]
-    end
+  if !doturbo
+    t3b += @elapsed phi .= sum(ns, dims=3)
   end
-  @show Ex[2, 2]
-  @show Ex[3, 3]
-  hex = @spawn pifft * Ex;
-  hey = @spawn pifft * Ey;
-  wait(hns0)
-  wait(hex)
-  wait(hey)
-  @show Ex[4, 4]
-  @show Ey[5, 5]
+  #hns0 = @spawn @tturbo @. ns = zero(eltype(ns)) # faster outside loop above
+  t4 += @elapsed @tturbo @. ns = 0.0 # faster outside loop above
+  #hexy = if doturbo
+  t5 += @elapsed hexy = if doturbo
+    phi .= pfft * phi;# OffsetArrays don't update in place
+    begin
+      @tturbo for j in axes(Ex, 2), i in axes(Ex, 1)
+        phi.re[i, j] *= minvkk[i, j]
+        phi.im[i, j] *= minvkk[i, j]
+        Ex.re[i, j] = - phi.im[i, j] * kx.im[i]
+        Ex.im[i, j] =   phi.re[i, j] * kx.im[i]
+      end
+      @tturbo for j in axes(Ex, 2)
+        kyimj = ky.im[j]
+        for i in axes(Ex, 1)
+          Ey.re[i, j] = - phi.im[i, j] * kyimj
+          Ey.im[i, j] =   phi.re[i, j] * kyimj
+        end
+      end
+    end
+    #@spawn ((Ex .= pifft * Ex), (Ey .= pifft * Ey))
+    ((Ex .= pifft * Ex), (Ey .= pifft * Ey))
+  else
+    pfft * phi;
+    @threads for j in axes(phi, 2)
+      for i in axes(phi, 1)
+        phi[i, j] = phi[i, j] * minvkk[i, j]
+        Ex[i, j] = phi[i,j] * kx[i] * im
+        Ey[i, j] = phi[i,j] * ky[j] * im
+      end
+    end
+    #@spawn ((pifft * Ex), (pifft * Ey))
+    ((pifft * Ex), (pifft * Ey))
+  end
+  #wait(hns0)
+  #wait(hexy)
   if t % NS == 0
-    t > 0 && throw(error("sadfashfsgafewa"))
     ti = (t ÷ NS)
     K[ti,1] = mean(((real.(Ex)).^2 .+ (real.(Ey)).^2))
     K[ti,2] = sum((vx.^2 + vy.^2).*w);
@@ -157,6 +177,12 @@ chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
     phis[:,:,ti] .= real.(phi);
   end
 end
+@show t1
+@show t2
+@show t3
+@show t3b
+@show t4
+@show t5
 return NX, NY, vth, n0, B0, T, dt, Exs, Eys, phis, NS, K
 end
 
