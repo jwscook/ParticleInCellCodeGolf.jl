@@ -66,6 +66,7 @@ struct ElectrostaticDiagnostics <: AbstractDiagnostics
   Eys::Vector{Array{Float64, 2}}
   ϕs::Vector{Array{Float64, 2}}
   ti::Ref{Int64}
+  makegifs::Bool
 end
 
 function generatestorage(NX, NY, ND, nstorage)
@@ -80,10 +81,10 @@ function generatestorage(NX, NY, ND, nstorage)
   return (allscalarstorage, momentumstorage, allfieldstorage)
 end
 
-function ElectrostaticDiagnostics(NX, NY, ND=256)
+function ElectrostaticDiagnostics(NX, NY, ND=256; makegifs=false)
   scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, ND, 3)
   return ElectrostaticDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., Ref(0))
+    fieldstorage..., Ref(0), makegifs)
 end
 
 struct LorenzGuageDiagnostics <: AbstractDiagnostics
@@ -101,12 +102,13 @@ struct LorenzGuageDiagnostics <: AbstractDiagnostics
   Azs::Vector{Array{Float64, 2}}
   ϕs::Vector{Array{Float64, 2}}
   ti::Ref{Int64}
+  makegifs::Bool
 end
 
-function LorenzGuageDiagnostics(NX, NY, ND=256)
+function LorenzGuageDiagnostics(NX, NY, ND=256; makegifs=false)
   scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, ND, 10)
   return LorenzGuageDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., Ref(0))
+    fieldstorage..., Ref(0), makegifs)
 end
 
 
@@ -233,10 +235,7 @@ end
 
 
 struct LorenzGuageField{T} <: AbstractField
-  ρs::Array{Float64, 3}
-  Jxs::Array{Float64, 3}
-  Jys::Array{Float64, 3}
-  Jzs::Array{Float64, 3}
+  ρJs::Array{Float64, 4}
   ϕ::Array{ComplexF64, 2}
   ϕ⁻::Array{ComplexF64, 2}
   Ax::Array{ComplexF64, 2}
@@ -263,7 +262,6 @@ struct LorenzGuageField{T} <: AbstractField
 end
 
 function LorenzGuageField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0)
-  ρJs=zeros(NX, NY, nthreads())
   # In wavenumber space
   ϕ=zeros(ComplexF64, NX, NY);
   ϕ⁻=zeros(ComplexF64, NX, NY);
@@ -287,7 +285,7 @@ function LorenzGuageField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0)
   gps = GridParameters(Lx, Ly, NX, NY, 1/NX, 1/NY)
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   boris = ElectromagneticBoris(dt)
-  return LorenzGuageField(ρJs, deepcopy(ρJs), deepcopy(ρJs), deepcopy(ρJs),
+  return LorenzGuageField(zeros(4, NX, NY, nthreads()),
     ϕ, ϕ⁻, Ax, Ay, Az, Ax⁻, Ay⁻, Az⁻, 
     Ex, Ey, Ez, ρ, Jx, Jy, Jz, Bx, By, Bz, EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
@@ -302,13 +300,27 @@ function update!(f::LorenzGuageField)
   f.EBxyz[6, :, :] .= real.(f.Bz) .+ f.B0[3]
 end
 
-function reduction!(a, b)
+function reduction!(a, z)
   @. a = 0.0
-  for k in axes(b, 3), j in axes(a, 2), i in axes(a, 1)
-    a[i, j] += b[i, j, k]
-    b[i, j, k] = 0.0
+  for k in axes(z, 3), j in axes(a, 2), i in axes(a, 1)
+    a[i, j] += z[i, j, k]
+    z[i, j, k] = 0.0
   end
 end
+function reduction!(a, b, c, d, z)
+  @. a = 0.0
+  @. b = 0.0
+  @. c = 0.0
+  @. d = 0.0
+  for k in axes(z, 4), j in axes(a, 2), i in axes(a, 1)
+    a[i, j] += z[1, i, j, k]
+    b[i, j] += z[2, i, j, k]
+    c[i, j] += z[3, i, j, k]
+    d[i, j] += z[4, i, j, k]
+    z[:, i, j, k] .= 0.0
+  end
+end
+
 
 
 #E = -∇ ϕ
@@ -394,11 +406,8 @@ function loop!(plasma, field::LorenzGuageField, to)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
   ΔV = cellvolume(field.gridparams)
   @timeit to "Particle loop" begin
-    @threads for j in axes(field.ρs, 3)
-      ρ = @view field.ρs[:, :, j]
-      Jx = @view field.Jxs[:, :, j]
-      Jy = @view field.Jys[:, :, j]
-      Jz = @view field.Jzs[:, :, j]
+    @threads for j in axes(field.ρJs, 4)
+      ρJ = @view field.ρJs[:, :, :, j]
       for species in plasma
         qw_ΔV = species.charge * species.weight / ΔV
         q_m = species.charge * species.mass
@@ -414,19 +423,17 @@ function loop!(plasma, field::LorenzGuageField, to)
                                       Byi, Bzi, q_m);
           x[i] = unimod(x[i] + vx[i]*dt, Lx)
           y[i] = unimod(y[i] + vy[i]*dt, Ly)
-          deposit!(ρ, species.shape, x[i], y[i], Lx, Ly, qw_ΔV)
-          deposit!(Jx, species.shape, x[i], y[i], Lx, Ly, qw_ΔV * vx[i])
-          deposit!(Jy, species.shape, x[i], y[i], Lx, Ly, qw_ΔV * vy[i])
-          deposit!(Jz, species.shape, x[i], y[i], Lx, Ly, qw_ΔV * vz[i])
+          deposit!(ρJ, species.shape, x[i], y[i], Lx, Ly, qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
         end
       end
     end
   end
   @timeit to "Field reduction" begin
-    reduction!(field.ρ, field.ρs)
-    reduction!(field.Jx, field.Jxs)
-    reduction!(field.Jy, field.Jys)
-    reduction!(field.Jz, field.Jzs)
+    #reduction!(field.ρ, field.ρs)
+    #reduction!(field.Jx, field.Jxs)
+    #reduction!(field.Jy, field.Jys)
+    #reduction!(field.Jz, field.Jzs)
+    reduction!(field.ρ, field.Jx, field.Jy, field.Jz, field.ρJs)
   end
   @timeit to "Field invert" begin
     field.ffthelper.pfft * field.ρ;
@@ -522,6 +529,19 @@ function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w::Number)
   end
 end
 
+function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w1, w2, w3, w4)
+  NX, NY = size(z)
+  @inbounds for (j, wy) in depositindicesweights(s, y, NY, Lx)
+    for (i, wx) in depositindicesweights(s, x, NX, Lx)
+      wxy = wx * wy
+      z[1,i,j] += wxy * w1
+      z[2,i,j] += wxy * w2
+      z[3,i,j] += wxy * w3
+      z[4,i,j] += wxy * w4
+    end
+  end
+end
+
 function diagnose!(d::AbstractDiagnostics, plasma, to)
   @timeit to "Plasma" begin
     @views begin
@@ -600,7 +620,7 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
   @views for (fvec, FS) in diagnosticfields(d)
     F = cat(fvec..., dims=3)
     all(iszero, F) && (println("$FS is empty"); continue)
-    if true
+    if d.makegifs
       maxabsF = maximum(abs, F)
       nsx = ceil(Int, size(F,1) / 128)
       nsy = ceil(Int, size(F,2) / 128)
@@ -658,22 +678,21 @@ function pic()
     NX = NY = 128
     Lx = Ly = 1
     P = NX * NY * 2^5
-    NT = 2^10
+    NT = 2^14
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
     vth = sqrt(n0) * dl
     B0 = sqrt(n0)/4;
-    NS = 2
+    NS = 16
   
     #dt = dl/6vth
     #field = PIC2D3V.ElectrostaticField(NX, NY, 1.0, 1.0, dt=dt, B0x=B0)
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT÷NS)
-    dt = 0.1 * dl/1 #/6vth
+    dt = 0.25 * dl/1 #/6vth
     field = PIC2D3V.LorenzGuageField(NX, NY, 1.0, 1.0, dt=dt, B0x=B0)
     diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT÷NS)
     electrons = PIC2D3V.Species(P, vth, n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
-    #field.ρs[end÷2, end÷2, 1] += 1
     plasma = [electrons]
 
     @show NX, NY, P, NT, NT÷NS, NS, dl, n0, vth, B0, dt
