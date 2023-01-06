@@ -65,26 +65,23 @@ struct ElectrostaticDiagnostics <: AbstractDiagnostics
   Exs::Vector{Array{Float64, 2}}
   Eys::Vector{Array{Float64, 2}}
   ϕs::Vector{Array{Float64, 2}}
+  nskip::Int
   ti::Ref{Int64}
   makegifs::Bool
 end
 
 function generatestorage(NX, NY, ND, nstorage)
-  scalarstorage = Float64[]
-  sizehint!(scalarstorage, ND)
-  allscalarstorage = (deepcopy(scalarstorage) for _ in 1:2)
-  momentumstorage = [Float64[]]
-  sizehint!(momentumstorage, ND)
-  fieldstorage = [zeros(NX, NY)]
-  sizehint!(fieldstorage, ND)
-  allfieldstorage = (deepcopy(fieldstorage) for _ in 1:nstorage)
-  return (allscalarstorage, momentumstorage, allfieldstorage)
+  scalarstorage = (zeros(ND) for _ in 1:2)
+  momentumstorage = [zeros(3) for _ in 1:ND]
+  fieldstorage = ([zeros(NX, NY) for _ in 1:ND] for _ in 1:nstorage)
+  return (scalarstorage, momentumstorage, fieldstorage)
 end
 
-function ElectrostaticDiagnostics(NX, NY, ND=256; makegifs=false)
-  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, ND, 3)
+function ElectrostaticDiagnostics(NX, NY, NT, NS; makegifs=false)
+  @assert NT >= NS
+  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷NS, 3)
   return ElectrostaticDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., Ref(0), makegifs)
+    fieldstorage..., NS, Ref(0), makegifs)
 end
 
 struct LorenzGuageDiagnostics <: AbstractDiagnostics
@@ -101,20 +98,23 @@ struct LorenzGuageDiagnostics <: AbstractDiagnostics
   Ays::Vector{Array{Float64, 2}}
   Azs::Vector{Array{Float64, 2}}
   ϕs::Vector{Array{Float64, 2}}
+  nskip::Int
   ti::Ref{Int64}
   makegifs::Bool
 end
 
-function LorenzGuageDiagnostics(NX, NY, ND=256; makegifs=false)
-  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, ND, 10)
+function LorenzGuageDiagnostics(NX, NY, NT::Int, NS::Int; makegifs=false)
+  @assert NT >= NS
+  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷NS, 10)
   return LorenzGuageDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., Ref(0), makegifs)
+    fieldstorage..., NS, Ref(0), makegifs)
 end
 
 
 abstract type AbstractShape end
 struct AreaWeighting <: AbstractShape end
 struct NGPWeighting <: AbstractShape end
+
 
 struct Species{S<:AbstractShape}
   charge::Float64
@@ -129,17 +129,13 @@ positions(s::Species) = (@view s.xyv[1:2, :])
 velocities(s::Species) = (@view s.xyv[3:5, :])
 
 function kineticenergy(s::Species)
-  v = velocities(s)
-  return mapreduce(u->u^2, +, v) * s.mass / 2 * s.weight
+  return mapreduce(u->u^2, +, velocities(s)) * s.mass / 2 * s.weight
 end
 
-function momentum(s::Species)
-  v = velocities(s)
-  return sum(v, dims=2)[:] * s.mass * s.weight
-end
+momentum(s::Species) = sum(velocities(s), dims=2)[:] * s.mass * s.weight
 
-calculateweight(s::AreaWeighting, n0, P) = n0/P;
-calculateweight(s::NGPWeighting, n0, P) = n0/P;
+calculateweight(s::AreaWeighting, n0, P) = n0 / P;
+calculateweight(s::NGPWeighting, n0, P) = n0 / P;
 
 function Species(P, vth, density, shape::AbstractShape; Lx, Ly,
     charge=1, mass=1)
@@ -167,6 +163,7 @@ function Base.sort!(s::Species, Δx, Δy)
   s.xyv .= s.xyv[:, p]
   return nothing
 end
+
 
 abstract type AbstractField end
 timestep(f::AbstractField) = f.boris.dt_2 * 2
@@ -232,7 +229,6 @@ function update!(f::ElectrostaticField)
   f.Exy[1, :, :] .= real.(f.Ex)
   f.Exy[2, :, :] .= real.(f.Ey)
 end
-
 
 struct LorenzGuageField{T} <: AbstractField
   ρJs::Array{Float64, 4}
@@ -300,6 +296,7 @@ function update!(f::LorenzGuageField)
   f.EBxyz[6, :, :] .= real.(f.Bz) .+ f.B0[3]
 end
 
+
 function reduction!(a, z)
   @. a = 0.0
   for k in axes(z, 3), j in axes(a, 2), i in axes(a, 1)
@@ -307,6 +304,7 @@ function reduction!(a, z)
     z[i, j, k] = 0.0
   end
 end
+
 function reduction!(a, b, c, d, z)
   @. a = 0.0
   @. b = 0.0
@@ -317,10 +315,11 @@ function reduction!(a, b, c, d, z)
     b[i, j] += z[2, i, j, k]
     c[i, j] += z[3, i, j, k]
     d[i, j] += z[4, i, j, k]
-    z[:, i, j, k] .= 0.0
+    for h in 1:4
+      z[h, i, j, k] = 0.0
+    end
   end
 end
-
 
 
 #E = -∇ ϕ
@@ -337,7 +336,7 @@ function loop!(plasma, field::ElectrostaticField, to)
     @threads for k in axes(field.ρs, 3)
       ρ = @view field.ρs[:, :, k]
       for species in plasma
-        qw_ΔV  = species.charge * species.weight / ΔV
+        qw_ΔV = species.charge * species.weight / ΔV
         q_m = species.charge * species.mass
         x = @view positions(species)[1, :]
         y = @view positions(species)[2, :]
@@ -418,7 +417,6 @@ function loop!(plasma, field::LorenzGuageField, to)
         vz = @view velocities(species)[3, :]
         for i in species.chunks[j]
           Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
-          #Exi != 0 && @show Exi, Eyi, Ezi, Bxi, Byi, Bzi
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi, Bxi,
                                       Byi, Bzi, q_m);
           x[i] = unimod(x[i] + vx[i]*dt, Lx)
@@ -429,10 +427,6 @@ function loop!(plasma, field::LorenzGuageField, to)
     end
   end
   @timeit to "Field reduction" begin
-    #reduction!(field.ρ, field.ρs)
-    #reduction!(field.Jx, field.Jxs)
-    #reduction!(field.Jy, field.Jys)
-    #reduction!(field.Jz, field.Jzs)
     reduction!(field.ρ, field.Jx, field.Jy, field.Jz, field.ρJs)
   end
   @timeit to "Field invert" begin
@@ -471,7 +465,7 @@ function loop!(plasma, field::LorenzGuageField, to)
   @timeit to "Field update" update!(field)
 end
 
-@inline function depositindicesweights(s::AbstractShape, z, NZ, Lz)
+@inline function depositindicesfractions(s::AbstractShape, z, NZ, Lz)
   zNZ = z / Lz * NZ
   i = unimod(ceil(Int, zNZ), NZ)
   r = i - zNZ;
@@ -487,8 +481,8 @@ end
   Lx, Ly = f.gridparams.Lx, f.gridparams.Ly
   Ex = zero(eltype(f.Exy))
   Ey = zero(eltype(f.Exy))
-  @inbounds for (j, wy) in depositindicesweights(s, yi, NY, Ly)
-    for (i, wx) in depositindicesweights(s, xi, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, Ly)
+    for (i, wx) in depositindicesfractions(s, xi, NX, Lx)
       wxy = wx * wy
       @muladd Ex += f.Exy[1,i,j] * wxy
       @muladd Ey += f.Exy[2,i,j] * wxy
@@ -506,8 +500,8 @@ end
   Bx = zero(eltype(f.EBxyz))
   By = zero(eltype(f.EBxyz))
   Bz = zero(eltype(f.EBxyz))
-  @inbounds for (j, wy) in depositindicesweights(s, yi, NY, Ly)
-    for (i, wx) in depositindicesweights(s, xi, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, Ly)
+    for (i, wx) in depositindicesfractions(s, xi, NX, Lx)
       wxy = wx * wy
       @muladd Ex += f.EBxyz[1,i,j] * wxy
       @muladd Ey += f.EBxyz[2,i,j] * wxy
@@ -520,10 +514,11 @@ end
   return (Ex, Ey, Ez, Bx, By, Bz)
 end
 
+
 function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w::Number)
   NX, NY = size(z)
-  @inbounds for (j, wy) in depositindicesweights(s, y, NY, Lx)
-    for (i, wx) in depositindicesweights(s, x, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, Lx)
+    for (i, wx) in depositindicesfractions(s, x, NX, Lx)
       z[i,j] += wx * wy * w
     end
   end
@@ -531,8 +526,8 @@ end
 
 function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w1, w2, w3, w4)
   NX, NY = size(z)
-  @inbounds for (j, wy) in depositindicesweights(s, y, NY, Lx)
-    for (i, wx) in depositindicesweights(s, x, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, Lx)
+    for (i, wx) in depositindicesfractions(s, x, NX, Lx)
       wxy = wx * wy
       z[1,i,j] += wxy * w1
       z[2,i,j] += wxy * w2
@@ -542,44 +537,55 @@ function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w1, w2, w3, w4)
   end
 end
 
+
 function diagnose!(d::AbstractDiagnostics, plasma, to)
   @timeit to "Plasma" begin
-    @views begin
-      push!(d.kineticenergy, sum(kineticenergy(s) for s in plasma))
-      push!(d.particlemomentum, sum(momentum(s) for s in plasma))
-    end
+    ti = d.ti[]
+    d.kineticenergy[ti] = sum(kineticenergy(s) for s in plasma)
+    d.particlemomentum[ti] = sum(momentum(s) for s in plasma)
   end
 end
 
-function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma, to)
+function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
+                   t, to)
   @timeit to "Diagnostics" begin
-    d.ti[] += 1
-    diagnose!(d, plasma, to)
-    @timeit to "Fields" begin
-      push!(d.fieldenergy, mean(abs2, f.Exy) / 2)
-      push!(d.Exs, real.(f.Ex))
-      push!(d.Eys, real.(f.Ey))
-      push!(d.ϕs, real.(f.ffthelper.pifft * f.ϕ));
-    end
-  end
-end
-
-function diagnose!(d::LorenzGuageDiagnostics, f::LorenzGuageField, plasma, to)
-  @timeit to "Diagnostics" begin
-    d.ti[] += 1
+    t % d.nskip == 0 && (d.ti[] += 1)
+    if t % d.nskip == 0
       diagnose!(d, plasma, to)
-      @timeit to "Fields" begin
-      push!(d.fieldenergy, mean(abs2, f.EBxyz) / 2)
-      push!(d.Exs, real.(f.Ex))
-      push!(d.Eys, real.(f.Ey))
-      push!(d.Ezs, real.(f.Ez))
-      push!(d.Bxs, real.(f.Bx))
-      push!(d.Bys, real.(f.By))
-      push!(d.Bzs, real.(f.Bz))
-      push!(d.Axs, real.(f.ffthelper.pifft * f.Ax));
-      push!(d.Ays, real.(f.ffthelper.pifft * f.Ay));
-      push!(d.Azs, real.(f.ffthelper.pifft * f.Az));
-      push!(d.ϕs, real.(f.ffthelper.pifft * f.ϕ));
+    end
+    @timeit to "Fields" begin
+      ti = d.ti[]
+      if t % d.nskip == 0
+        d.fieldenergy[ti] = mean(abs2, f.Exy) / 2
+      end
+      d.Exs[ti] .+= real.(f.Ex) ./ d.nskip
+      d.Eys[ti] .+= real.(f.Ey) ./ d.nskip
+      d.ϕs[ti] .+= real.(f.ffthelper.pifft * f.ϕ) ./ d.nskip
+    end
+  end
+end
+
+function diagnose!(d::LorenzGuageDiagnostics, f::LorenzGuageField, plasma, t, to)
+  @timeit to "Diagnostics" begin
+    t % d.nskip == 0 && (d.ti[] += 1)
+    if t % d.nskip == 0
+      diagnose!(d, plasma, to)
+    end
+    @timeit to "Fields" begin
+      ti = d.ti[]
+      if t % d.nskip == 0
+        d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
+      end
+      @views d.Exs[ti] .+= real.(f.Ex) ./ d.nskip
+      @views d.Eys[ti] .+= real.(f.Ey) ./ d.nskip
+      @views d.Ezs[ti] .+= real.(f.Ez) ./ d.nskip
+      @views d.Bxs[ti] .+= real.(f.Bx) ./ d.nskip
+      @views d.Bys[ti] .+= real.(f.By) ./ d.nskip
+      @views d.Bzs[ti] .+= real.(f.Bz) ./ d.nskip
+      d.Axs[ti] .+= real.(f.ffthelper.pifft * f.Ax) ./ d.nskip;
+      d.Ays[ti] .+= real.(f.ffthelper.pifft * f.Ay) ./ d.nskip;
+      d.Azs[ti] .+= real.(f.ffthelper.pifft * f.Az) ./ d.nskip;
+      d.ϕs[ti] .+= real.(f.ffthelper.pifft * f.ϕ) ./ d.nskip
       f.ffthelper.pfft * f.ϕ; # Fourier transpose back
       f.ffthelper.pfft * f.Ax; # Fourier transpose back
       f.ffthelper.pfft * f.Ay; # Fourier transpose back
@@ -675,34 +681,36 @@ function pic()
   to = TimerOutput()
 
   @timeit to "Initialisation" begin
-    NX = NY = 128
+    NX = NY = 256
     Lx = Ly = 1
     P = NX * NY * 2^5
-    NT = 2^14
+    NT = 2^16
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
     vth = sqrt(n0) * dl
     B0 = sqrt(n0)/4;
-    NS = 16
-  
+    NS = 4
+
     #dt = dl/6vth
-    #field = PIC2D3V.ElectrostaticField(NX, NY, 1.0, 1.0, dt=dt, B0x=B0)
-    #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT÷NS)
+    #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
+    #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, NS; makegifs=false)
     dt = 0.25 * dl/1 #/6vth
-    field = PIC2D3V.LorenzGuageField(NX, NY, 1.0, 1.0, dt=dt, B0x=B0)
-    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT÷NS)
+    field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
+    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, NS)
     electrons = PIC2D3V.Species(P, vth, n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
     plasma = [electrons]
 
     @show NX, NY, P, NT, NT÷NS, NS, dl, n0, vth, B0, dt
+
+    @show vth * (NT * dt)
+    @show (NT * dt) / (2pi/B0), (2pi/B0) / (dt * NS)
+    @show (NT * dt) / (2pi/sqrt(n0)),  (2pi/sqrt(n0)) / (dt * NS)
   end
   
-  @showprogress 1 for t in 1:NT;
+  @showprogress 1 for t in 0:NT-1;
     PIC2D3V.loop!(plasma, field, to)
-    if t % NS == 0
-      PIC2D3V.diagnose!(diagnostics, field, plasma, to)
-    end
+    PIC2D3V.diagnose!(diagnostics, field, plasma, t, to)
   end
 
   show(to)
