@@ -127,6 +127,7 @@ struct Species{S<:AbstractShape}
 end
 positions(s::Species) = (@view s.xyv[1:2, :])
 velocities(s::Species) = (@view s.xyv[3:5, :])
+xyvchunk(s::Species, i::Int) = @view s.xyv[:, s.chunks[i]]
 
 function kineticenergy(s::Species)
   return mapreduce(u->u^2, +, velocities(s)) * s.mass / 2 * s.weight
@@ -214,15 +215,12 @@ end
 
 function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0)
   ρs=zeros(NX, NY, nthreads())
-  ϕ=zeros(ComplexF64, NX, NY);
-  Ex=zeros(ComplexF64, NX, NY);
-  Ey=zeros(ComplexF64, NX, NY);
   Exy=zeros(2, NX, NY);
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   gps = GridParameters(Lx, Ly, NX, NY, 1/NX, 1/NY)
   boris = ElectrostaticBoris([B0x, B0y, B0z], dt)
-  return ElectrostaticField(ρs, ϕ, Ex, Ey, Exy,
-    Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
+  return ElectrostaticField(ρs, (zeros(ComplexF64, NX, NY) for _ in 1:3)...,
+    Exy, Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
 end
 
 function update!(f::ElectrostaticField)
@@ -258,32 +256,12 @@ struct LorenzGuageField{T} <: AbstractField
 end
 
 function LorenzGuageField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0)
-  # In wavenumber space
-  ϕ=zeros(ComplexF64, NX, NY);
-  ϕ⁻=zeros(ComplexF64, NX, NY);
-  Ax=zeros(ComplexF64, NX, NY);
-  Ay=zeros(ComplexF64, NX, NY);
-  Az=zeros(ComplexF64, NX, NY);
-  Ax⁻=zeros(ComplexF64, NX, NY);
-  Ay⁻=zeros(ComplexF64, NX, NY);
-  Az⁻=zeros(ComplexF64, NX, NY);
-  ρ=zeros(ComplexF64, NX, NY);
-  Jx=zeros(ComplexF64, NX, NY);
-  Jy=zeros(ComplexF64, NX, NY);
-  Jz=zeros(ComplexF64, NX, NY);
-  Ex=zeros(ComplexF64, NX, NY);
-  Ey=zeros(ComplexF64, NX, NY);
-  Ez=zeros(ComplexF64, NX, NY);
-  Bx=zeros(ComplexF64, NX, NY);
-  By=zeros(ComplexF64, NX, NY);
-  Bz=zeros(ComplexF64, NX, NY);
   EBxyz=zeros(6, NX, NY);
   gps = GridParameters(Lx, Ly, NX, NY, 1/NX, 1/NY)
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   boris = ElectromagneticBoris(dt)
   return LorenzGuageField(zeros(4, NX, NY, nthreads()),
-    ϕ, ϕ⁻, Ax, Ay, Az, Ax⁻, Ay⁻, Az⁻, 
-    Ex, Ey, Ez, ρ, Jx, Jy, Jz, Bx, By, Bz, EBxyz,
+    (zeros(ComplexF64, NX, NY) for _ in 1:18)..., EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
 end
 
@@ -306,6 +284,7 @@ function reduction!(a, z)
 end
 
 function reduction!(a, b, c, d, z)
+  @assert size(z, 1) == 4
   @. a = 0.0
   @. b = 0.0
   @. c = 0.0
@@ -343,8 +322,7 @@ function loop!(plasma, field::ElectrostaticField, to)
         vx = @view velocities(species)[1, :]
         vy = @view velocities(species)[2, :]
         vz = @view velocities(species)[3, :]
-        for i in species.chunks[k]
-          @assert (0 < x[i] <= Lx) && (0 < y[i] <= Ly) "x[i] = $(x[i]), y[i] = $(y[i])"
+        @inbounds for i in species.chunks[k]
           Exi, Eyi = field(species.shape, x[i], y[i])
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m);
           x[i] = unimod(x[i] + vx[i]*dt, Lx)
@@ -415,7 +393,7 @@ function loop!(plasma, field::LorenzGuageField, to)
         vx = @view velocities(species)[1, :]
         vy = @view velocities(species)[2, :]
         vz = @view velocities(species)[3, :]
-        for i in species.chunks[j]
+        @inbounds for i in species.chunks[j]
           Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi, Bxi,
                                       Byi, Bzi, q_m);
@@ -465,7 +443,8 @@ function loop!(plasma, field::LorenzGuageField, to)
   @timeit to "Field update" update!(field)
 end
 
-@inline function depositindicesfractions(s::AbstractShape, z, NZ, Lz)
+@inline function depositindicesfractions(s::AbstractShape, z::Float64, NZ::Int,
+                                         Lz::Float64)
   zNZ = z / Lz * NZ
   i = unimod(ceil(Int, zNZ), NZ)
   r = i - zNZ;
@@ -479,13 +458,12 @@ end
 @inline function (f::ElectrostaticField)(s::AbstractShape, xi, yi)
   NX, NY = f.gridparams.NX, f.gridparams.NY
   Lx, Ly = f.gridparams.Lx, f.gridparams.Ly
-  Ex = zero(eltype(f.Exy))
-  Ey = zero(eltype(f.Exy))
+  Ex = Ey = zero(eltype(f.Exy))
   @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, Ly)
     for (i, wx) in depositindicesfractions(s, xi, NX, Lx)
       wxy = wx * wy
-      @muladd Ex += f.Exy[1,i,j] * wxy
-      @muladd Ey += f.Exy[2,i,j] * wxy
+      @muladd Ex = Ex + f.Exy[1,i,j] * wxy
+      @muladd Ey = Ey + f.Exy[2,i,j] * wxy
     end
   end
   return (Ex, Ey)
@@ -494,26 +472,20 @@ end
 @inline function (f::LorenzGuageField)(s::AbstractShape, xi, yi)
   NX, NY = f.gridparams.NX, f.gridparams.NY
   Lx, Ly = f.gridparams.Lx, f.gridparams.Ly
-  Ex = zero(eltype(f.EBxyz))
-  Ey = zero(eltype(f.EBxyz))
-  Ez = zero(eltype(f.EBxyz))
-  Bx = zero(eltype(f.EBxyz))
-  By = zero(eltype(f.EBxyz))
-  Bz = zero(eltype(f.EBxyz))
+  Ex = Ey = Ez = Bx = By = Bz = zero(eltype(f.EBxyz))
   @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, Ly)
     for (i, wx) in depositindicesfractions(s, xi, NX, Lx)
       wxy = wx * wy
-      @muladd Ex += f.EBxyz[1,i,j] * wxy
-      @muladd Ey += f.EBxyz[2,i,j] * wxy
-      @muladd Ez += f.EBxyz[3,i,j] * wxy
-      @muladd Bx += f.EBxyz[4,i,j] * wxy
-      @muladd By += f.EBxyz[5,i,j] * wxy
-      @muladd Bz += f.EBxyz[6,i,j] * wxy
+      @muladd Ex = Ex + f.EBxyz[1,i,j] * wxy
+      @muladd Ey = Ey + f.EBxyz[2,i,j] * wxy
+      @muladd Ez = Ez + f.EBxyz[3,i,j] * wxy
+      @muladd Bx = Bx + f.EBxyz[4,i,j] * wxy
+      @muladd By = By + f.EBxyz[5,i,j] * wxy
+      @muladd Bz = Bz + f.EBxyz[6,i,j] * wxy
     end
   end
   return (Ex, Ey, Ez, Bx, By, Bz)
 end
-
 
 function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w::Number)
   NX, NY = size(z)
@@ -525,14 +497,15 @@ function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w::Number)
 end
 
 function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w1, w2, w3, w4)
-  NX, NY = size(z)
+  NV, NX, NY = size(z)
+  @assert NV == 4
   @inbounds for (j, wy) in depositindicesfractions(s, y, NY, Lx)
     for (i, wx) in depositindicesfractions(s, x, NX, Lx)
       wxy = wx * wy
-      z[1,i,j] += wxy * w1
-      z[2,i,j] += wxy * w2
-      z[3,i,j] += wxy * w3
-      z[4,i,j] += wxy * w4
+      @muladd z[1,i,j] = z[1,i,j] + wxy * w1
+      @muladd z[2,i,j] = z[2,i,j] + wxy * w2
+      @muladd z[3,i,j] = z[3,i,j] + wxy * w3
+      @muladd z[4,i,j] = z[4,i,j] + wxy * w4
     end
   end
 end
@@ -672,7 +645,7 @@ end
 
 end
 
-using ProgressMeter, TimerOutputs
+using ProgressMeter, TimerOutputs, Plots
 
 import .PIC2D3V
 
@@ -681,28 +654,29 @@ function pic()
   to = TimerOutput()
 
   @timeit to "Initialisation" begin
-    NX = NY = 256
-    Lx = Ly = 1
+    NX = NY = 128
+    Lx = Ly = 1.0
     P = NX * NY * 2^5
-    NT = 2^16
+    NT = 2^15
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
     vth = sqrt(n0) * dl
     B0 = sqrt(n0)/4;
-    NS = 4
+    NS = 2
 
     #dt = dl/6vth
     #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, NS; makegifs=false)
-    dt = 0.25 * dl/1 #/6vth
+    dt = 0.1 * dl/1 #/6vth
     field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
     diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, NS)
     electrons = PIC2D3V.Species(P, vth, n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
-    plasma = [electrons]
+    ions = PIC2D3V.Species(P, vth / sqrt(32), n0, PIC2D3V.AreaWeighting();
+      Lx=Lx, Ly=Ly, charge=1, mass=32)
+    plasma = [electrons]#, ions]
 
     @show NX, NY, P, NT, NT÷NS, NS, dl, n0, vth, B0, dt
-
     @show vth * (NT * dt)
     @show (NT * dt) / (2pi/B0), (2pi/B0) / (dt * NS)
     @show (NT * dt) / (2pi/sqrt(n0)),  (2pi/sqrt(n0)) / (dt * NS)
