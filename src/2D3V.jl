@@ -10,7 +10,8 @@ Plots.gr()
 
 Random.seed!(0)
 
-unimod(x, n) = 0 < x <= n ? x : x > n ? x - n : x + n
+#unimod(x, n) = 0 < x <= n ? x : x > n ? x - n : x + n
+unimod(x, n) = x > n ? x - n : x > 0 ? x : x + n
 
 function halton(i, base, seed=0.0)
   result, f = 0.0, 1.0
@@ -62,10 +63,10 @@ struct ElectrostaticDiagnostics <: AbstractDiagnostics
   kineticenergy::Vector{Float64}
   fieldenergy::Vector{Float64}
   particlemomentum::Vector{Vector{Float64}}
-  Exs::Vector{Array{Float64, 2}}
-  Eys::Vector{Array{Float64, 2}}
-  ϕs::Vector{Array{Float64, 2}}
-  nskip::Int
+  Exs::Array{Float64, 3}
+  Eys::Array{Float64, 3}
+  ϕs::Array{Float64, 3}
+  ntskip::Int
   ti::Ref{Int64}
   makegifs::Bool
 end
@@ -73,41 +74,41 @@ end
 function generatestorage(NX, NY, ND, nstorage)
   scalarstorage = (zeros(ND) for _ in 1:2)
   momentumstorage = [zeros(3) for _ in 1:ND]
-  fieldstorage = ([zeros(NX, NY) for _ in 1:ND] for _ in 1:nstorage)
+  fieldstorage = (zeros(NX, NY, ND) for _ in 1:nstorage)
   return (scalarstorage, momentumstorage, fieldstorage)
 end
 
-function ElectrostaticDiagnostics(NX, NY, NT, NS; makegifs=false)
-  @assert NT >= NS
-  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷NS, 3)
+function ElectrostaticDiagnostics(NX, NY, NT, ntskip; makegifs=false)
+  @assert NT >= ntskip
+  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷ntskip, 3)
   return ElectrostaticDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., NS, Ref(0), makegifs)
+    fieldstorage..., ntskip, Ref(0), makegifs)
 end
 
 struct LorenzGuageDiagnostics <: AbstractDiagnostics
   kineticenergy::Array{Float64, 1}
   fieldenergy::Array{Float64, 1}
   particlemomentum::Vector{Vector{Float64}}
-  Exs::Vector{Array{Float64, 2}}
-  Eys::Vector{Array{Float64, 2}}
-  Ezs::Vector{Array{Float64, 2}}
-  Bxs::Vector{Array{Float64, 2}}
-  Bys::Vector{Array{Float64, 2}}
-  Bzs::Vector{Array{Float64, 2}}
-  Axs::Vector{Array{Float64, 2}}
-  Ays::Vector{Array{Float64, 2}}
-  Azs::Vector{Array{Float64, 2}}
-  ϕs::Vector{Array{Float64, 2}}
-  nskip::Int
+  Exs::Array{Float64, 3}
+  Eys::Array{Float64, 3}
+  Ezs::Array{Float64, 3}
+  Bxs::Array{Float64, 3}
+  Bys::Array{Float64, 3}
+  Bzs::Array{Float64, 3}
+  Axs::Array{Float64, 3}
+  Ays::Array{Float64, 3}
+  Azs::Array{Float64, 3}
+  ϕs::Array{Float64, 3}
+  ntskip::Int
   ti::Ref{Int64}
   makegifs::Bool
 end
 
-function LorenzGuageDiagnostics(NX, NY, NT::Int, NS::Int; makegifs=false)
-  @assert NT >= NS
-  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷NS, 10)
+function LorenzGuageDiagnostics(NX, NY, NT::Int, ntskip::Int; makegifs=false)
+  @assert NT >= ntskip
+  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷ntskip, 10)
   return LorenzGuageDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., NS, Ref(0), makegifs)
+    fieldstorage..., ntskip, Ref(0), makegifs)
 end
 
 
@@ -176,28 +177,35 @@ struct GridParameters
   NY::Int
   ΔX::Float64
   ΔY::Float64
+  NX_Lx::Float64
+  NY_Ly::Float64
+end
+function GridParameters(Lx, Ly, NX, NY)
+  return GridParameters(Lx, Ly, NX, NY, 1/NX, 1/NY, NX / Lx, NY / Ly)
 end
 
 cellvolume(g::GridParameters) = g.ΔX * g.ΔY
 
-struct FFTHelper{T, U}
+struct FFTHelper{T, U, V}
   kx::Vector{Float64}
   ky::LinearAlgebra.Adjoint{Float64, Vector{Float64}}
   k²::Matrix{Float64}
-  negative_im_k⁻²::Matrix{ComplexF64}
-  pfft::T
-  pifft::U
+  im_k⁻²::Matrix{ComplexF64}
+  pfft!::T
+  pifft!::U
+  pifft::V
 end
 function FFTHelper(NX, NY, Lx, Ly)
   kx=2π/Lx*vcat(0:NX÷2-1,-NX÷2:-1);
   ky=2π/Ly*vcat(0:NY÷2-1,-NY÷2:-1)';
   kk = -(kx.^2 .+ ky.^2)
-  negative_im_k⁻²= im ./ kk
-  negative_im_k⁻²[1, 1] = 0
+  im_k⁻²= im ./ kk
+  im_k⁻²[1, 1] = 0
   z = zeros(ComplexF64, NX, NY)
-  pfft = plan_fft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
-  pifft = plan_ifft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
-  return FFTHelper(kx, ky, kk, negative_im_k⁻², pfft, pifft)
+  pfft! = plan_fft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
+  pifft! = plan_ifft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
+  pifft = plan_ifft(z; flags=FFTW.ESTIMATE, timelimit=Inf)
+  return FFTHelper(kx, ky, kk, im_k⁻², pfft!, pifft!, pifft)
 end
 
 
@@ -217,18 +225,27 @@ function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0)
   ρs=zeros(NX, NY, nthreads())
   Exy=zeros(2, NX, NY);
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
-  gps = GridParameters(Lx, Ly, NX, NY, 1/NX, 1/NY)
+  gps = GridParameters(Lx, Ly, NX, NY)
   boris = ElectrostaticBoris([B0x, B0y, B0z], dt)
   return ElectrostaticField(ρs, (zeros(ComplexF64, NX, NY) for _ in 1:3)...,
     Exy, Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
 end
 
 function update!(f::ElectrostaticField)
-  f.Exy[1, :, :] .= real.(f.Ex)
-  f.Exy[2, :, :] .= real.(f.Ey)
+  @. f.Exy[1, :, :] = real(f.Ex)
+  @. f.Exy[2, :, :] = real(f.Ey)
 end
 
-struct LorenzGuageField{T} <: AbstractField
+abstract type AbstractImEx end
+struct Explicit <: AbstractImEx end
+struct Implicit <: AbstractImEx end
+struct ImEx <: AbstractImEx
+  θ::Float64
+end
+
+
+struct LorenzGuageField{T, U} <: AbstractField
+  imex::T
   ρJs::Array{Float64, 4}
   ϕ::Array{ComplexF64, 2}
   ϕ⁻::Array{ComplexF64, 2}
@@ -251,19 +268,24 @@ struct LorenzGuageField{T} <: AbstractField
   EBxyz::Array{Float64, 3}
   B0::NTuple{3, Float64}
   gridparams::GridParameters
-  ffthelper::T
+  ffthelper::U
   boris::ElectromagneticBoris
 end
 
-function LorenzGuageField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0)
+function LorenzGuageField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
+    imex::AbstractImEx=Explicit())
   EBxyz=zeros(6, NX, NY);
-  gps = GridParameters(Lx, Ly, NX, NY, 1/NX, 1/NY)
+  gps = GridParameters(Lx, Ly, NX, NY)
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   boris = ElectromagneticBoris(dt)
-  return LorenzGuageField(zeros(4, NX, NY, nthreads()),
+  return LorenzGuageField(imex, zeros(4, NX, NY, nthreads()),
     (zeros(ComplexF64, NX, NY) for _ in 1:18)..., EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
 end
+
+theta(::Explicit) = 0
+theta(imex::ImEx) = imex.θ
+theta(::Implicit) = 1
 
 function update!(f::LorenzGuageField)
   f.EBxyz[1, :, :] .= real.(f.Ex)
@@ -300,23 +322,23 @@ function reduction!(a, b, c, d, z)
   end
 end
 
-
-#E = -∇ ϕ
-#∇ . E = -∇.∇ ϕ = -∇^2 ϕ = ρ
-#-i^2 (kx^2 + ky^2) ϕ = ρ
-#ϕ = ρ / (kx^2 + ky^2)
+# E = -∇ ϕ
+# ∇ . E = -∇.∇ ϕ = -∇^2 ϕ = ρ
+# -i^2 (kx^2 + ky^2) ϕ = ρ
+# ϕ = ρ / (kx^2 + ky^2)
 # Ex = - ∇_x ϕ = - i kx ϕ = - i kx ρ / (kx^2 + ky^2)
 # Ey = - ∇_y ϕ = - i ky ϕ = - i ky ρ / (kx^2 + ky^2)
 function loop!(plasma, field::ElectrostaticField, to)
   dt = timestep(field)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
+  NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
   ΔV = cellvolume(field.gridparams)
   @timeit to "Particle Loop" begin
     @threads for k in axes(field.ρs, 3)
       ρ = @view field.ρs[:, :, k]
       for species in plasma
         qw_ΔV = species.charge * species.weight / ΔV
-        q_m = species.charge * species.mass
+        q_m = species.charge / species.mass
         x = @view positions(species)[1, :]
         y = @view positions(species)[2, :]
         vx = @view velocities(species)[1, :]
@@ -327,20 +349,23 @@ function loop!(plasma, field::ElectrostaticField, to)
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m);
           x[i] = unimod(x[i] + vx[i]*dt, Lx)
           y[i] = unimod(y[i] + vy[i]*dt, Ly)
-          deposit!(ρ, species.shape, x[i], y[i], Lx, Ly, qw_ΔV)
+          deposit!(ρ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
         end
       end
     end
   end
-  @timeit to "Field reduction" begin
+
+  @timeit to "Field Reduction" begin
     reduction!(field.ϕ, field.ρs)
   end
   @timeit to "Field Forward FT" begin
-    field.ffthelper.pfft * field.ϕ;
+    field.ffthelper.pfft! * field.ϕ;
     field.ϕ[1, 1] = 0
+  end
+  @timeit to "Field Solve" begin
     @threads for j in axes(field.ϕ, 2)
       for i in axes(field.ϕ, 1)
-        tmp = field.ϕ[i, j] * field.ffthelper.negative_im_k⁻²[i, j]
+        tmp = field.ϕ[i, j] * field.ffthelper.im_k⁻²[i, j]
         @assert isfinite(tmp)
         field.Ex[i, j] = tmp * field.ffthelper.kx[i]
         field.Ey[i, j] = tmp * field.ffthelper.ky[j]
@@ -348,15 +373,53 @@ function loop!(plasma, field::ElectrostaticField, to)
     end
   end
   @timeit to "Field Inverse FT" begin
-    field.ffthelper.pifft * field.Ex
-    field.ffthelper.pifft * field.Ey
+    field.ffthelper.pifft! * field.Ex
+    field.ffthelper.pifft! * field.Ey
   end
-  @timeit to "Field update" update!(field)
+  @timeit to "Field Update" update!(field)
 end
 
-function lorenzguage!(xⁿ, xⁿ⁻¹, sⁿ, k², dt)
+# ∇² f - 1/c^2 ∂ₜ² f = -S
+# ∇² f - ∂ₜ² f = -S
+# ∂ₜ² f = S + k^2 f
+# f⁺ - 2f + f⁻ = Δ² S + Δ² k^2 (θ/2 f⁺ + (1-θ)f + θ/2 *f⁻)
+# f⁺ - 2f + f⁻ = Δ² S + Δ² k^2 θ/2 f⁺ - Δ² k^2 (1-θ)f - Δ² k^2 θ/2 f⁻
+# (1 - Δ² k^2 θ/2) f⁺ = 2f - f⁻ + Δ² S + Δ² k^2 (1-θ)f + Δ² k^2 θ/2 f⁻
+# (1 - Δ² k^2 θ/2) f⁺ = (2 + Δ² k^2 (1-θ)) f - (1 - Δ² k^2 θ/2 ) f⁻ + Δ² S
+# f⁺ = (1 - Δ² k^2 θ/2)⁻¹ (2 + Δ² k^2 (1-θ)) f - (1 - Δ² k^2 θ/2)⁻¹ (1 - Δ² k^2 θ/2) f⁻ + (1 - Δ² k^2 θ/2)⁻¹ Δ² S
+# f⁺ = (1 - Δ² k^2 θ/2)⁻¹ ((2 + Δ² k^2 (1-θ)) f + Δ² S) - f⁻
+
+# Make it more implicit?
+# ∇⋅J = ∂ₜρ
+# ∇⋅J = (ρ⁺ - ρ⁻) / 2 Δt
+# ρ⁺ = 2Δt ∇⋅J + ρ⁻
+# ∂ₜJ = -∇x∇xE - ∂ₜ² E
+# ∂ₜJ = ∇x∇x∇ϕ + ∂ₜ² k ϕ
+# ϕ⁺ - 2ϕ + ϕ⁻ = Δ² S + Δ² k^2 θ/2 ϕ⁺ - Δ² k^2 (1-θ)ϕ - Δ² k^2 θ/2 ϕ⁻
+# S = θ/2 ϕ⁺ + θ/2 ρ⁻ + (1-θ)ρ
+# S = θ/2 (2Δt ∇⋅J + ρ⁻) + θ/2ρ⁻ + (1-θ)ρ
+# S = θΔt ∇⋅J + θ ρ⁻ + (1-θ)ρ
+# ϕ⁺ - 2ϕ + ϕ⁻ = Δ² (θΔt ∇⋅J + θ ρ⁻ + (1-θ)ρ) + 
+#       Δ² k^2 θ/2 ϕ⁺ - Δ² k^2 (1-θ)ϕ - Δ² k^2 θ/2 ϕ⁻
+
+# A⁺ - 2A + A⁻ = Δ² J + Δ² k^2 θ/2 A⁺ - Δ² k^2 (1-θ)A - Δ² k^2 θ/2 A⁻
+# J⁺ = J⁻ + 2Δ (∇x∇x∇ϕ + ∂ₜ² k ϕ)
+# J⁺ = J⁻ + 2Δ (∇x∇x∇ϕ + k (ρ + k^2ϕ))
+
+
+# J = θΔt ∇⋅J + θ ρ⁻ + (1-θ)ρ
+
+@inline denominator(::Explicit, dt, k², θ) = 1
+@inline denominator(::Implicit, dt, k², θ) = 1 - dt^2 * k² / 2
+@inline denominator(::ImEx, dt, k², θ) = 1 - dt^2 * k² * θ / 2
+@inline numerator(::Explicit, dt, k², θ) = 2 + dt^2 * k²
+@inline numerator(::Implicit, dt, k², θ) = 2
+@inline numerator(::ImEx, dt, k², θ) = 2 + dt^2 * k² * (1 - θ)
+function lorenzguage!(imex::AbstractImEx, xⁿ, xⁿ⁻¹, sⁿ, k², dt)
+  θ = theta(imex)
   @inbounds @threads for i in eachindex(xⁿ)
-    xⁿ⁺¹ = 2xⁿ[i] - xⁿ⁻¹[i] + (sⁿ[i] + k²[i] * xⁿ[i]) * dt^2
+#    xⁿ⁺¹ = 2xⁿ[i] - xⁿ⁻¹[i] + (sⁿ[i] + k²[i] * xⁿ[i]) * dt^2
+    xⁿ⁺¹ = (numerator(imex, dt, k²[i], θ) * xⁿ[i] + dt^2 * sⁿ[i]) / denominator(imex, dt, k²[i], θ) - xⁿ⁻¹[i]
     xⁿ⁻¹[i] = xⁿ[i]
     xⁿ[i] = xⁿ⁺¹
   end
@@ -381,13 +444,14 @@ end
 function loop!(plasma, field::LorenzGuageField, to)
   dt = timestep(field)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
+  NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
   ΔV = cellvolume(field.gridparams)
-  @timeit to "Particle loop" begin
+  @timeit to "Particle Loop" begin
     @threads for j in axes(field.ρJs, 4)
       ρJ = @view field.ρJs[:, :, :, j]
       for species in plasma
         qw_ΔV = species.charge * species.weight / ΔV
-        q_m = species.charge * species.mass
+        q_m = species.charge / species.mass
         x = @view positions(species)[1, :]
         y = @view positions(species)[2, :]
         vx = @view velocities(species)[1, :]
@@ -399,27 +463,30 @@ function loop!(plasma, field::LorenzGuageField, to)
                                       Byi, Bzi, q_m);
           x[i] = unimod(x[i] + vx[i]*dt, Lx)
           y[i] = unimod(y[i] + vy[i]*dt, Ly)
-          deposit!(ρJ, species.shape, x[i], y[i], Lx, Ly, qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+          deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+                   qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
         end
       end
     end
   end
-  @timeit to "Field reduction" begin
+  @timeit to "Field Reduction" begin
     reduction!(field.ρ, field.Jx, field.Jy, field.Jz, field.ρJs)
   end
-  @timeit to "Field invert" begin
-    field.ffthelper.pfft * field.ρ;
-    field.ffthelper.pfft * field.Jx;
-    field.ffthelper.pfft * field.Jy;
-    field.ffthelper.pfft * field.Jz;
+  @timeit to "Field Forward FT" begin
+    field.ffthelper.pfft! * field.ρ;
+    field.ffthelper.pfft! * field.Jx;
+    field.ffthelper.pfft! * field.Jy;
+    field.ffthelper.pfft! * field.Jz;
+  end
+  @timeit to "Field Solve" begin
     field.ρ[1, 1] = 0
     field.Jx[1, 1] = 0
     field.Jy[1, 1] = 0
     field.Jz[1, 1] = 0
-    lorenzguage!(field.ϕ, field.ϕ⁻, field.ρ, field.ffthelper.k², dt)
-    lorenzguage!(field.Ax, field.Ax⁻, field.Jx, field.ffthelper.k², dt)
-    lorenzguage!(field.Ay, field.Ay⁻, field.Jy, field.ffthelper.k², dt)
-    lorenzguage!(field.Az, field.Az⁻, field.Jz, field.ffthelper.k², dt)
+    lorenzguage!(field.imex, field.ϕ, field.ϕ⁻, field.ρ, field.ffthelper.k², dt)
+    lorenzguage!(field.imex, field.Ax, field.Ax⁻, field.Jx, field.ffthelper.k², dt)
+    lorenzguage!(field.imex, field.Ay, field.Ay⁻, field.Jy, field.ffthelper.k², dt)
+    lorenzguage!(field.imex, field.Az, field.Az⁻, field.Jz, field.ffthelper.k², dt)
     # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
     # Bʰ = ∇x(A⁺ + A⁰)/2
     @. field.Ex = -im * field.ffthelper.kx * (field.ϕ + field.ϕ⁻) / 2
@@ -432,23 +499,23 @@ function loop!(plasma, field::LorenzGuageField, to)
     @. field.Bz = im * field.ffthelper.kx * (field.Ay + field.Ay⁻) / 2
     @. field.Bz -= im * field.ffthelper.ky * (field.Ax + field.Ax⁻) / 2
   end
-  @timeit to "Field solve" begin
-    field.ffthelper.pifft * field.Ex
-    field.ffthelper.pifft * field.Ey
-    field.ffthelper.pifft * field.Ez
-    field.ffthelper.pifft * field.Bx
-    field.ffthelper.pifft * field.By
-    field.ffthelper.pifft * field.Bz
+  @timeit to "Field Inverse FT" begin
+    field.ffthelper.pifft! * field.Ex
+    field.ffthelper.pifft! * field.Ey
+    field.ffthelper.pifft! * field.Ez
+    field.ffthelper.pifft! * field.Bx
+    field.ffthelper.pifft! * field.By
+    field.ffthelper.pifft! * field.Bz
   end
-  @timeit to "Field update" update!(field)
+  @timeit to "Field Update" update!(field)
 end
 
 @inline function depositindicesfractions(s::AbstractShape, z::Float64, NZ::Int,
-                                         Lz::Float64)
-  zNZ = z / Lz * NZ
+    NZ_Lz::Float64)
+  zNZ = z * NZ_Lz
   i = unimod(ceil(Int, zNZ), NZ)
   r = i - zNZ;
-  @assert 0 < r <= 1 "$z, $NZ, $Lz, $i"
+  @assert 0 < r <= 1 "$z, $NZ, $NZ_Lz, $i"
   return gridinteractiontuple(s, i, r, NZ)
 end
 
@@ -457,10 +524,10 @@ end
 
 @inline function (f::ElectrostaticField)(s::AbstractShape, xi, yi)
   NX, NY = f.gridparams.NX, f.gridparams.NY
-  Lx, Ly = f.gridparams.Lx, f.gridparams.Ly
+  NX_Lx, NY_Ly = f.gridparams.NX_Lx, f.gridparams.NY_Ly
   Ex = Ey = zero(eltype(f.Exy))
-  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, Ly)
-    for (i, wx) in depositindicesfractions(s, xi, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, NY_Ly)
+    for (i, wx) in depositindicesfractions(s, xi, NX, NX_Lx)
       wxy = wx * wy
       @muladd Ex = Ex + f.Exy[1,i,j] * wxy
       @muladd Ey = Ey + f.Exy[2,i,j] * wxy
@@ -471,10 +538,10 @@ end
 
 @inline function (f::LorenzGuageField)(s::AbstractShape, xi, yi)
   NX, NY = f.gridparams.NX, f.gridparams.NY
-  Lx, Ly = f.gridparams.Lx, f.gridparams.Ly
+  NX_Lx, NY_Ly = f.gridparams.NX_Lx, f.gridparams.NY_Ly
   Ex = Ey = Ez = Bx = By = Bz = zero(eltype(f.EBxyz))
-  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, Ly)
-    for (i, wx) in depositindicesfractions(s, xi, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, NY_Ly)
+    for (i, wx) in depositindicesfractions(s, xi, NX, NX_Lx)
       wxy = wx * wy
       @muladd Ex = Ex + f.EBxyz[1,i,j] * wxy
       @muladd Ey = Ey + f.EBxyz[2,i,j] * wxy
@@ -487,20 +554,20 @@ end
   return (Ex, Ey, Ez, Bx, By, Bz)
 end
 
-function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w::Number)
+function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, w::Number)
   NX, NY = size(z)
-  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, Lx)
-    for (i, wx) in depositindicesfractions(s, x, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
+    for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
       z[i,j] += wx * wy * w
     end
   end
 end
 
-function deposit!(z, s::AbstractShape, x, y, Lx, Ly, w1, w2, w3, w4)
+function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, w1, w2, w3, w4)
   NV, NX, NY = size(z)
   @assert NV == 4
-  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, Lx)
-    for (i, wx) in depositindicesfractions(s, x, NX, Lx)
+  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
+    for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
       wxy = wx * wy
       @muladd z[1,i,j] = z[1,i,j] + wxy * w1
       @muladd z[2,i,j] = z[2,i,j] + wxy * w2
@@ -522,47 +589,44 @@ end
 function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
                    t, to)
   @timeit to "Diagnostics" begin
-    t % d.nskip == 0 && (d.ti[] += 1)
-    if t % d.nskip == 0
+    t % d.ntskip == 0 && (d.ti[] += 1)
+    if t % d.ntskip == 0
       diagnose!(d, plasma, to)
     end
     @timeit to "Fields" begin
       ti = d.ti[]
-      if t % d.nskip == 0
+      if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.Exy) / 2
       end
-      d.Exs[ti] .+= real.(f.Ex) ./ d.nskip
-      d.Eys[ti] .+= real.(f.Ey) ./ d.nskip
-      d.ϕs[ti] .+= real.(f.ffthelper.pifft * f.ϕ) ./ d.nskip
+      @views d.Exs[:, :, ti] .+= real.(f.Ex) ./ d.ntskip
+      @views d.Eys[:, :, ti] .+= real.(f.Ey) ./ d.ntskip
+      @views d.ϕs[:, :, ti] .+= real.(f.ffthelper.pifft! * f.ϕ) ./ d.ntskip
+      f.ffthelper.pfft! * f.ϕ
     end
   end
 end
 
 function diagnose!(d::LorenzGuageDiagnostics, f::LorenzGuageField, plasma, t, to)
   @timeit to "Diagnostics" begin
-    t % d.nskip == 0 && (d.ti[] += 1)
-    if t % d.nskip == 0
+    t % d.ntskip == 0 && (d.ti[] += 1)
+    if t % d.ntskip == 0
       diagnose!(d, plasma, to)
     end
     @timeit to "Fields" begin
       ti = d.ti[]
-      if t % d.nskip == 0
+      if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
       end
-      @views d.Exs[ti] .+= real.(f.Ex) ./ d.nskip
-      @views d.Eys[ti] .+= real.(f.Ey) ./ d.nskip
-      @views d.Ezs[ti] .+= real.(f.Ez) ./ d.nskip
-      @views d.Bxs[ti] .+= real.(f.Bx) ./ d.nskip
-      @views d.Bys[ti] .+= real.(f.By) ./ d.nskip
-      @views d.Bzs[ti] .+= real.(f.Bz) ./ d.nskip
-      d.Axs[ti] .+= real.(f.ffthelper.pifft * f.Ax) ./ d.nskip;
-      d.Ays[ti] .+= real.(f.ffthelper.pifft * f.Ay) ./ d.nskip;
-      d.Azs[ti] .+= real.(f.ffthelper.pifft * f.Az) ./ d.nskip;
-      d.ϕs[ti] .+= real.(f.ffthelper.pifft * f.ϕ) ./ d.nskip
-      f.ffthelper.pfft * f.ϕ; # Fourier transpose back
-      f.ffthelper.pfft * f.Ax; # Fourier transpose back
-      f.ffthelper.pfft * f.Ay; # Fourier transpose back
-      f.ffthelper.pfft * f.Az; # Fourier transpose back
+      @views d.Exs[:, :, ti] .+= real.(f.Ex) ./ d.ntskip
+      @views d.Eys[:, :, ti] .+= real.(f.Ey) ./ d.ntskip
+      @views d.Ezs[:, :, ti] .+= real.(f.Ez) ./ d.ntskip
+      @views d.Bxs[:, :, ti] .+= real.(f.Bx) ./ d.ntskip
+      @views d.Bys[:, :, ti] .+= real.(f.By) ./ d.ntskip
+      @views d.Bzs[:, :, ti] .+= real.(f.Bz) ./ d.ntskip
+      @views d.Axs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ax) ./ d.ntskip;
+      @views d.Ays[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ay) ./ d.ntskip;
+      @views d.Azs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Az) ./ d.ntskip;
+      @views d.ϕs[:, :, ti] .+= real.(f.ffthelper.pifft * f.ϕ) ./ d.ntskip
     end
   end
 end
@@ -594,10 +658,11 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
   kxs = 2π .* (0:g.NX-1) ./ (B0/vth);
   kys = 2π .* (0:g.NY-1) ./ (B0/vth);
   
-  wind = findlast(ws .< max(5, 2 * sqrt(n0)/B0));
+  wind = findlast(ws .< max(10, 4 * sqrt(n0)/B0));
   isnothing(wind) && (wind = length(ws)÷2)
-  @views for (fvec, FS) in diagnosticfields(d)
-    F = cat(fvec..., dims=3)
+  kxind = min(length(kxs)÷2-1, 128)
+  kyind = min(length(kys)÷2-1, 128)
+  @views for (F, FS) in diagnosticfields(d)
     all(iszero, F) && (println("$FS is empty"); continue)
     if d.makegifs
       maxabsF = maximum(abs, F)
@@ -620,22 +685,22 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
     ylabel!(L"Position y $[v_{th} / \Omega]$")
     savefig("PIC2D3V_$(FS)_XY_final.png")
   
-    Z = log10.(sum(i->abs.(fft(F[:, i, :])[2:end÷2-1, 1:wind]), 1:size(F, 2)))'
-    heatmap(kxs[2:end÷2-1], ws[1:wind], Z)
+    Z = log10.(sum(i->abs.(fft(F[:, i, :] .* filter)[2:kxind, 1:wind]), 1:size(F, 2)))'
+    heatmap(kxs[2:kxind], ws[1:wind], Z)
     xlabel!(L"Wavenumber x $[\Omega_c / v_{th}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumy_c.png")
     xlabel!(L"Wavenumber x $[\Pi / v_{th}]$");
     ylabel!(L"Frequency $[\Pi]$")
-    heatmap(kxs[2:end÷2-1] .* B0 / sqrt(n0), ws[1:wind] .* B0 / sqrt(n0), Z)
+    heatmap(kxs[2:kxind] .* B0 / sqrt(n0), ws[1:wind] .* B0 / sqrt(n0), Z)
     savefig("PIC2D3V_$(FS)_WKsumy_p.png")
    
-    Z = log10.(sum(i->abs.(fft(F[i, :, :])[2:end÷2-1, 1:wind]), 1:size(F, 1)))'
-    heatmap(kys[2:end÷2-1], ws[1:wind], Z)
+    Z = log10.(sum(i->abs.(fft(F[i, :, :] .* filter)[2:kyind, 1:wind]), 1:size(F, 1)))'
+    heatmap(kys[2:kyind], ws[1:wind], Z)
     xlabel!(L"Wavenumber y $[\Omega_c / v_{th}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumx_c.png")
-    heatmap(kys[2:end÷2-1] .* B0 / sqrt(n0), ws[1:wind] .* B0 / sqrt(n0), Z)
+    heatmap(kys[2:kyind] .* B0 / sqrt(n0), ws[1:wind] .* B0 / sqrt(n0), Z)
     xlabel!(L"Wavenumber y $[\Pi / v_{th}]$");
     ylabel!(L"Frequency $[\Pi]$")
     savefig("PIC2D3V_$(FS)_WKsumx_p.png")
@@ -654,32 +719,37 @@ function pic()
   to = TimerOutput()
 
   @timeit to "Initialisation" begin
-    NX = NY = 128
-    Lx = Ly = 1.0
-    P = NX * NY * 2^5
-    NT = 2^15
+    NQ = 1
+    NX = 64 ÷ NQ
+    NY = 64 * NQ
+    Lx = 1.0
+    Ly = Lx * NY / NX
+    P = NX * NY * 2^4
+    NT = 2^14
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
     vth = sqrt(n0) * dl
-    B0 = sqrt(n0)/4;
-    NS = 2
+    B0 = sqrt(n0) / 4;
 
+    #ntskip = 4
     #dt = dl/6vth
     #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
-    #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, NS; makegifs=false)
-    dt = 0.1 * dl/1 #/6vth
-    field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
-    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, NS)
+    #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip; makegifs=false)
+    ntskip = prevpow(2, round(Int, 8 / 6vth))
+    dt = dl/4 #/6vth
+    field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
+      imex=PIC2D3V.Explicit())
+    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip)
     electrons = PIC2D3V.Species(P, vth, n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
-    ions = PIC2D3V.Species(P, vth / sqrt(32), n0, PIC2D3V.AreaWeighting();
-      Lx=Lx, Ly=Ly, charge=1, mass=32)
-    plasma = [electrons]#, ions]
+    ions = PIC2D3V.Species(P, vth / sqrt(16), n0, PIC2D3V.AreaWeighting();
+      Lx=Lx, Ly=Ly, charge=1, mass=16)
+    plasma = [electrons, ions]
 
-    @show NX, NY, P, NT, NT÷NS, NS, dl, n0, vth, B0, dt
+    @show NX, NY, P, NT, NT÷ntskip, ntskip, dl, n0, vth, B0, dt
     @show vth * (NT * dt)
-    @show (NT * dt) / (2pi/B0), (2pi/B0) / (dt * NS)
-    @show (NT * dt) / (2pi/sqrt(n0)),  (2pi/sqrt(n0)) / (dt * NS)
+    @show (NT * dt) / (2pi/B0), (2pi/B0) / (dt * ntskip)
+    @show (NT * dt) / (2pi/sqrt(n0)),  (2pi/sqrt(n0)) / (dt * ntskip)
   end
   
   @showprogress 1 for t in 0:NT-1;
@@ -691,7 +761,8 @@ function pic()
 
   return diagnostics, field, plasma, n0, vth, NT
 end
-
+using StatProfilerHTML
+@profilehtml pic()
 diagnostics, field, plasma, n0, vcharacteristic, NT = pic()
 
 PIC2D3V.plotfields(diagnostics, field, n0, vcharacteristic, NT)
