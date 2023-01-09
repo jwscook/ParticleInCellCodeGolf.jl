@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.8.5"
+julia_version = "1.8.3"
 manifest_format = "2.0"
-project_hash = "ce569d8baacf8ccf7238547a9a1aaabf21289766"
+project_hash = "a8e3640b3c6829de2fa1e98d6fd2142d61d9d7ac"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -833,6 +833,11 @@ git-tree-sha1 = "91eddf657aca81df9ae6ceb20b959ae5653ad1de"
 uuid = "992d4aef-0814-514b-bc4d-f2e9a6c4116f"
 version = "1.0.3"
 
+[[deps.SnoopPrecompile]]
+git-tree-sha1 = "f604441450a3c0569830946e5b33b78c928e1a85"
+uuid = "66db9d55-30c0-4569-8b51-7e840670fc0c"
+version = "1.0.1"
+
 [[deps.Sockets]]
 uuid = "6462fe0b-24de-5631-8697-dd941f90decc"
 
@@ -927,6 +932,12 @@ version = "1.10.1"
 [[deps.Test]]
 deps = ["InteractiveUtils", "Logging", "Random", "Serialization"]
 uuid = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[[deps.ThreadPinning]]
+deps = ["DelimitedFiles", "Libdl", "LinearAlgebra", "Preferences", "Random", "SnoopPrecompile"]
+git-tree-sha1 = "0240eee54b2367557bbbfc026f3d61e5e690fe70"
+uuid = "811555cd-349b-4f26-b7bc-1f208b848042"
+version = "0.7.2"
 
 [[deps.ThreadingUtilities]]
 deps = ["ManualMemory"]

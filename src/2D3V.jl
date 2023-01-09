@@ -3,7 +3,9 @@ module PIC2D3V
 using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Random
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, MuladdMacro, CommonSubexpressions
-using TimerOutputs
+using TimerOutputs#, ThreadPinning
+
+#@static Base.Sys.islinux() && ThreadPinning.pinthreads(:cores)
 
 FFTW.set_num_threads(Threads.nthreads())
 Plots.gr()
@@ -130,9 +132,7 @@ positions(s::Species) = (@view s.xyv[1:2, :])
 velocities(s::Species) = (@view s.xyv[3:5, :])
 xyvchunk(s::Species, i::Int) = @view s.xyv[:, s.chunks[i]]
 
-function kineticenergy(s::Species)
-  return mapreduce(u->u^2, +, velocities(s)) * s.mass / 2 * s.weight
-end
+kineticenergy(s::Species) = sum(abs2, velocities(s)) * s.mass / 2 * s.weight
 
 momentum(s::Species) = sum(velocities(s), dims=2)[:] * s.mass * s.weight
 
@@ -344,7 +344,7 @@ function loop!(plasma, field::ElectrostaticField, to)
         vx = @view velocities(species)[1, :]
         vy = @view velocities(species)[2, :]
         vz = @view velocities(species)[3, :]
-        @inbounds for i in species.chunks[k]
+        for i in species.chunks[k]
           Exi, Eyi = field(species.shape, x[i], y[i])
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m);
           x[i] = unimod(x[i] + vx[i]*dt, Lx)
@@ -417,7 +417,7 @@ end
 @inline numerator(::ImEx, dt, k², θ) = 2 + dt^2 * k² * (1 - θ)
 function lorenzguage!(imex::AbstractImEx, xⁿ, xⁿ⁻¹, sⁿ, k², dt)
   θ = theta(imex)
-  @inbounds @threads for i in eachindex(xⁿ)
+  @threads for i in eachindex(xⁿ)
 #    xⁿ⁺¹ = 2xⁿ[i] - xⁿ⁻¹[i] + (sⁿ[i] + k²[i] * xⁿ[i]) * dt^2
     xⁿ⁺¹ = (numerator(imex, dt, k²[i], θ) * xⁿ[i] + dt^2 * sⁿ[i]) / denominator(imex, dt, k²[i], θ) - xⁿ⁻¹[i]
     xⁿ⁻¹[i] = xⁿ[i]
@@ -457,7 +457,7 @@ function loop!(plasma, field::LorenzGuageField, to)
         vx = @view velocities(species)[1, :]
         vy = @view velocities(species)[2, :]
         vz = @view velocities(species)[3, :]
-        @inbounds for i in species.chunks[j]
+        for i in species.chunks[j]
           Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi, Bxi,
                                       Byi, Bzi, q_m);
@@ -526,7 +526,7 @@ end
   NX, NY = f.gridparams.NX, f.gridparams.NY
   NX_Lx, NY_Ly = f.gridparams.NX_Lx, f.gridparams.NY_Ly
   Ex = Ey = zero(eltype(f.Exy))
-  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, NY_Ly)
+  for (j, wy) in depositindicesfractions(s, yi, NY, NY_Ly)
     for (i, wx) in depositindicesfractions(s, xi, NX, NX_Lx)
       wxy = wx * wy
       @muladd Ex = Ex + f.Exy[1,i,j] * wxy
@@ -540,7 +540,7 @@ end
   NX, NY = f.gridparams.NX, f.gridparams.NY
   NX_Lx, NY_Ly = f.gridparams.NX_Lx, f.gridparams.NY_Ly
   Ex = Ey = Ez = Bx = By = Bz = zero(eltype(f.EBxyz))
-  @inbounds for (j, wy) in depositindicesfractions(s, yi, NY, NY_Ly)
+  for (j, wy) in depositindicesfractions(s, yi, NY, NY_Ly)
     for (i, wx) in depositindicesfractions(s, xi, NX, NX_Lx)
       wxy = wx * wy
       @muladd Ex = Ex + f.EBxyz[1,i,j] * wxy
@@ -556,7 +556,7 @@ end
 
 function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, w::Number)
   NX, NY = size(z)
-  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
+  for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
     for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
       z[i,j] += wx * wy * w
     end
@@ -566,7 +566,7 @@ end
 function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, w1, w2, w3, w4)
   NV, NX, NY = size(z)
   @assert NV == 4
-  @inbounds for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
+  for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
     for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
       wxy = wx * wy
       @muladd z[1,i,j] = z[1,i,j] + wxy * w1
@@ -597,6 +597,7 @@ function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
       ti = d.ti[]
       if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.Exy) / 2
+        #@show d.fieldenergy[ti] + d.kineticenergy[ti]
       end
       @views d.Exs[:, :, ti] .+= real.(f.Ex) ./ d.ntskip
       @views d.Eys[:, :, ti] .+= real.(f.Ey) ./ d.ntskip
@@ -616,6 +617,7 @@ function diagnose!(d::LorenzGuageDiagnostics, f::LorenzGuageField, plasma, t, to
       ti = d.ti[]
       if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
+        #@show d.fieldenergy[ti] + d.kineticenergy[ti]
       end
       @views d.Exs[:, :, ti] .+= real.(f.Ex) ./ d.ntskip
       @views d.Eys[:, :, ti] .+= real.(f.Ey) ./ d.ntskip
@@ -657,8 +659,14 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
   
   kxs = 2π .* (0:g.NX-1) ./ (B0/vth);
   kys = 2π .* (0:g.NY-1) ./ (B0/vth);
+
+
+  plot(ts, d.fieldenergy, label="Fields")
+  plot!(ts, d.kineticenergy, label="Particles")
+  plot!(ts, d.fieldenergy + d.kineticenergy, label="Total")
+  savefig("Energies.png")
   
-  wind = findlast(ws .< max(10, 4 * sqrt(n0)/B0));
+  wind = findlast(ws .< max(10, 6 * sqrt(n0)/B0));
   isnothing(wind) && (wind = length(ws)÷2)
   kxind = min(length(kxs)÷2-1, 128)
   kyind = min(length(kys)÷2-1, 128)
@@ -720,8 +728,8 @@ function pic()
 
   @timeit to "Initialisation" begin
     NQ = 1
-    NX = 64 ÷ NQ
-    NY = 64 * NQ
+    NX = 128 ÷ NQ
+    NY = 128 * NQ
     Lx = 1.0
     Ly = Lx * NY / NX
     P = NX * NY * 2^5
@@ -731,22 +739,22 @@ function pic()
     vth = sqrt(n0) * dl
     B0 = sqrt(n0) / 4;
 
-    #ntskip = 4
-    #dt = dl/6vth
-    #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
-    #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip; makegifs=false)
-    ntskip = prevpow(2, round(Int, 8 / 6vth))
-    dt = dl/4 #/6vth
-    field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-      imex=PIC2D3V.Explicit())
-    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip)
+    ntskip = 4
+    dt = dl/6vth
+    field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt)#, B0x=B0)
+    diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip; makegifs=false)
+    #ntskip = prevpow(2, round(Int, 8 / 6vth))
+    #dt = dl/5 #/6vth
+    #field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
+    #  imex=PIC2D3V.Implicit())
+    #diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip)
     electrons = PIC2D3V.Species(P, vth, n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
     ions = PIC2D3V.Species(P, vth / sqrt(16), n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=1, mass=16)
     sort!(electrons, Lx / NX, Ly / NY)
     sort!(ions, Lx / NX, Ly / NY)
-    plasma = [electrons, ions]
+    plasma = [electrons]#, ions]
 
     @show NX, NY, P, NT, NT÷ntskip, ntskip, dl, n0, vth, B0, dt
     @show vth * (NT * dt)
