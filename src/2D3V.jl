@@ -161,8 +161,8 @@ end
 
 function Base.sort!(s::Species, Δx, Δy)
   sortperm!(s.p, eachindex(s.p),
-    by=x->(ceil(Int, s.xyv[1] / Δx), ceil(Int, s.xyz[2] / Δy)))
-  s.xyv .= s.xyv[:, p]
+    by=i->(ceil(Int, s.xyv[1,i] / Δx), ceil(Int, s.xyv[2,i] / Δy), s.xyv[3,i]))
+  s.xyv .= s.xyv[:, s.p]
   return nothing
 end
 
@@ -724,7 +724,7 @@ function pic()
     NY = 64 * NQ
     Lx = 1.0
     Ly = Lx * NY / NX
-    P = NX * NY * 2^4
+    P = NX * NY * 2^5
     NT = 2^14
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
@@ -744,6 +744,8 @@ function pic()
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
     ions = PIC2D3V.Species(P, vth / sqrt(16), n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=1, mass=16)
+    sort!(electrons, Lx / NX, Ly / NY)
+    sort!(ions, Lx / NX, Ly / NY)
     plasma = [electrons, ions]
 
     @show NX, NY, P, NT, NT÷ntskip, ntskip, dl, n0, vth, B0, dt
@@ -762,7 +764,6 @@ function pic()
   return diagnostics, field, plasma, n0, vth, NT
 end
 using StatProfilerHTML
-@profilehtml pic()
 diagnostics, field, plasma, n0, vcharacteristic, NT = pic()
 
 PIC2D3V.plotfields(diagnostics, field, n0, vcharacteristic, NT)
