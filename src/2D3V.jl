@@ -3,16 +3,12 @@ module PIC2D3V
 using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Random
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, MuladdMacro, CommonSubexpressions
-using TimerOutputs#, ThreadPinning
-
-#@static Base.Sys.islinux() && ThreadPinning.pinthreads(:cores)
+using TimerOutputs
 
 FFTW.set_num_threads(Threads.nthreads())
-Plots.gr()
 
 Random.seed!(0)
 
-#unimod(x, n) = 0 < x <= n ? x : x > n ? x - n : x + n
 unimod(x, n) = x > n ? x - n : x > 0 ? x : x + n
 
 function halton(i, base, seed=0.0)
@@ -69,28 +65,32 @@ struct ElectrostaticDiagnostics <: AbstractDiagnostics
   Eys::Array{Float64, 3}
   ϕs::Array{Float64, 3}
   ntskip::Int
+  ngskip::Int
   ti::Ref{Int64}
   makegifs::Bool
 end
 
-function generatestorage(NX, NY, ND, nstorage)
-  scalarstorage = (zeros(ND) for _ in 1:2)
-  momentumstorage = [zeros(3) for _ in 1:ND]
+function generatestorage(NX, NY, ND, nscalar, nmomentum, nstorage)
+  scalarstorage = (zeros(ND) for _ in 1:nscalar)
+  momentumstorage = ([zeros(3) for _ in 1:ND] for _ in 1:nmomentum)
   fieldstorage = (zeros(NX, NY, ND) for _ in 1:nstorage)
   return (scalarstorage, momentumstorage, fieldstorage)
 end
 
-function ElectrostaticDiagnostics(NX, NY, NT, ntskip; makegifs=false)
+function ElectrostaticDiagnostics(NX, NY, NT, ntskip, ngskip=1; makegifs=false)
   @assert NT >= ntskip
-  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷ntskip, 3)
-  return ElectrostaticDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., ntskip, Ref(0), makegifs)
+  @assert ispow2(ngskip)
+  scalarstorage, momentumstorage, fieldstorage = generatestorage(
+    NX÷ngskip, NY÷ngskip, NT÷ntskip, 2, 1, 3)
+  return ElectrostaticDiagnostics(scalarstorage..., momentumstorage...,
+    fieldstorage..., ntskip, ngskip, Ref(0), makegifs)
 end
 
 struct LorenzGuageDiagnostics <: AbstractDiagnostics
   kineticenergy::Array{Float64, 1}
   fieldenergy::Array{Float64, 1}
   particlemomentum::Vector{Vector{Float64}}
+  fieldmomentum::Vector{Vector{Float64}}
   Exs::Array{Float64, 3}
   Eys::Array{Float64, 3}
   Ezs::Array{Float64, 3}
@@ -102,15 +102,19 @@ struct LorenzGuageDiagnostics <: AbstractDiagnostics
   Azs::Array{Float64, 3}
   ϕs::Array{Float64, 3}
   ntskip::Int
+  ngskip::Int
   ti::Ref{Int64}
   makegifs::Bool
 end
 
-function LorenzGuageDiagnostics(NX, NY, NT::Int, ntskip::Int; makegifs=false)
+function LorenzGuageDiagnostics(NX, NY, NT::Int, ntskip::Int, ngskip=1;
+                                makegifs=false)
   @assert NT >= ntskip
-  scalarstorage, momentumstorage, fieldstorage = generatestorage(NX, NY, NT÷ntskip, 10)
-  return LorenzGuageDiagnostics(scalarstorage..., momentumstorage,
-    fieldstorage..., ntskip, Ref(0), makegifs)
+  @assert ispow2(ngskip)
+  scalarstorage, momentumstorage, fieldstorage = generatestorage(
+    NX÷ngskip, NY÷ngskip, NT÷ntskip, 2, 2, 10)
+  return LorenzGuageDiagnostics(scalarstorage..., momentumstorage...,
+    fieldstorage..., ntskip, ngskip, Ref(0), makegifs)
 end
 
 
@@ -597,11 +601,13 @@ function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
       ti = d.ti[]
       if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.Exy) / 2
-        #@show d.fieldenergy[ti] + d.kineticenergy[ti]
+        #@show d.fieldenergy[ti], d.kineticenergy[ti]
       end
-      @views d.Exs[:, :, ti] .+= real.(f.Ex) ./ d.ntskip
-      @views d.Eys[:, :, ti] .+= real.(f.Ey) ./ d.ntskip
-      @views d.ϕs[:, :, ti] .+= real.(f.ffthelper.pifft! * f.ϕ) ./ d.ntskip
+      a = 1:d.ngskip:size(f.Ex, 1)
+      b = 1:d.ngskip:size(f.Ex, 2)
+      @views d.Exs[:, :, ti] .+= real.(f.Ex[a, b]) ./ d.ntskip
+      @views d.Eys[:, :, ti] .+= real.(f.Ey[a, b]) ./ d.ntskip
+      @views d.ϕs[:, :, ti] .+= real.(f.ffthelper.pifft! * f.ϕ)[a, b] ./ d.ntskip
       f.ffthelper.pfft! * f.ϕ
     end
   end
@@ -617,18 +623,26 @@ function diagnose!(d::LorenzGuageDiagnostics, f::LorenzGuageField, plasma, t, to
       ti = d.ti[]
       if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
-        #@show d.fieldenergy[ti] + d.kineticenergy[ti]
+        d.fieldmomentum[ti] .= (
+          mean(real.(f.Ey .* f.Bz .- f.Ez .* f.By)),
+          mean(real.(f.Ez .* f.Bx .- f.Ex .* f.Bz)),
+          mean(real.(f.Ex .* f.By .- f.Ey .* f.Bx)))
+        #@show d.fieldenergy[ti], d.kineticenergy[ti]
       end
-      @views d.Exs[:, :, ti] .+= real.(f.Ex) ./ d.ntskip
-      @views d.Eys[:, :, ti] .+= real.(f.Ey) ./ d.ntskip
-      @views d.Ezs[:, :, ti] .+= real.(f.Ez) ./ d.ntskip
-      @views d.Bxs[:, :, ti] .+= real.(f.Bx) ./ d.ntskip
-      @views d.Bys[:, :, ti] .+= real.(f.By) ./ d.ntskip
-      @views d.Bzs[:, :, ti] .+= real.(f.Bz) ./ d.ntskip
-      @views d.Axs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ax) ./ d.ntskip;
-      @views d.Ays[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ay) ./ d.ntskip;
-      @views d.Azs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Az) ./ d.ntskip;
-      @views d.ϕs[:, :, ti] .+= real.(f.ffthelper.pifft * f.ϕ) ./ d.ntskip
+      a = 1:d.ngskip:size(f.Ex, 1)
+      b = 1:d.ngskip:size(f.Ex, 2)
+      for (jl, jr) in enumerate(b), (il, ir) in enumerate(a)
+        d.Exs[il, jl, ti] += real(f.Ex[ir, jr]) / d.ntskip
+        d.Eys[il, jl, ti] += real(f.Ey[ir, jr]) / d.ntskip
+        d.Ezs[il, jl, ti] += real(f.Ez[ir, jr]) / d.ntskip
+        d.Bxs[il, jl, ti] += real(f.Bx[ir, jr]) / d.ntskip
+        d.Bys[il, jl, ti] += real(f.By[ir, jr]) / d.ntskip
+        d.Bzs[il, jl, ti] += real(f.Bz[ir, jr]) / d.ntskip
+      end
+      @views d.Axs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ax)[a,b] ./ d.ntskip;
+      @views d.Ays[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ay)[a,b] ./ d.ntskip;
+      @views d.Azs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Az)[a,b] ./ d.ntskip;
+      @views d.ϕs[:, :, ti] .+= real.(f.ffthelper.pifft * f.ϕ)[a,b] ./ d.ntskip
     end
   end
 end
@@ -647,26 +661,31 @@ end
 
 function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
   B0 = norm(field.B0)
+  w0 = iszero(B0) ? sqrt(n0) : B0
   dt = timestep(field)
   g = field.gridparams
-  xs = (1:g.NX) ./ g.NX ./ (vth / B0)
-  ys = (1:g.NY) ./ g.NY ./ (vth / B0)
+  NXd = g.NX÷d.ngskip
+  NYd = g.NY÷d.ngskip
+  Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
+  xs = collect(1:NXd) ./ NXd ./ (vth / w0) * Lx
+  ys = collect(1:NYd) ./ NYd ./ (vth / w0) * Ly
   ndiags = d.ti[]
-  ts = (1:ndiags) .* ((NT * dt / ndiags) / (2pi/B0))
+  ts = collect(1:ndiags) .* ((NT * dt / ndiags) / (2pi/w0))
 
-  filter = sin.(((1:ndiags) .- 0.5) ./ ndiags .* pi)'
-  ws = 2π/(NT * dt) .* (1:ndiags) ./ (B0);
+  filter = sin.((collect(1:ndiags) .- 0.5) ./ ndiags .* pi)'
+  ws = 2π / (NT * dt) .* (1:ndiags) ./ (w0);
   
-  kxs = 2π .* (0:g.NX-1) ./ (B0/vth);
-  kys = 2π .* (0:g.NY-1) ./ (B0/vth);
+  kxs = 2π/Lx .* collect(0:NXd-1) ./ (w0/vth);
+  kys = 2π/Ly .* collect(0:NYd-1) ./ (w0/vth);
 
+  k0 = d.fieldenergy[1] + d.kineticenergy[1]
 
   plot(ts, d.fieldenergy, label="Fields")
   plot!(ts, d.kineticenergy, label="Particles")
   plot!(ts, d.fieldenergy + d.kineticenergy, label="Total")
   savefig("Energies.png")
   
-  wind = findlast(ws .< max(10, 6 * sqrt(n0)/B0));
+  wind = findlast(ws .< max(10, 6 * sqrt(n0)/w0));
   isnothing(wind) && (wind = length(ws)÷2)
   kxind = min(length(kxs)÷2-1, 128)
   kyind = min(length(kys)÷2-1, 128)
@@ -674,6 +693,7 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
     all(iszero, F) && (println("$FS is empty"); continue)
     if d.makegifs
       maxabsF = maximum(abs, F)
+      maxabsF = iszero(maxabsF) ? 1.0 : maxabsF
       nsx = ceil(Int, size(F,1) / 128)
       nsy = ceil(Int, size(F,2) / 128)
       anim = @animate for i in axes(F, 3)
@@ -683,11 +703,12 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
       end
       gif(anim, "PIC2D3V_$(FS)_XY.gif", fps=10)
     end
-  
+
     heatmap(xs, ys, F[:, :, 1])
     xlabel!(L"Position x $[v_{th} / \Omega]$");
     ylabel!(L"Position y $[v_{th} / \Omega]$")
     savefig("PIC2D3V_$(FS)_XY_ic.png")
+
     heatmap(xs, ys, F[:, :, end])
     xlabel!(L"Position x $[v_{th} / \Omega]$");
     ylabel!(L"Position y $[v_{th} / \Omega]$")
@@ -700,7 +721,7 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
     savefig("PIC2D3V_$(FS)_WKsumy_c.png")
     xlabel!(L"Wavenumber x $[\Pi / v_{th}]$");
     ylabel!(L"Frequency $[\Pi]$")
-    heatmap(kxs[2:kxind] .* B0 / sqrt(n0), ws[1:wind] .* B0 / sqrt(n0), Z)
+    heatmap(kxs[2:kxind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
     savefig("PIC2D3V_$(FS)_WKsumy_p.png")
    
     Z = log10.(sum(i->abs.(fft(F[i, :, :] .* filter)[2:kyind, 1:wind]), 1:size(F, 1)))'
@@ -708,7 +729,7 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
     xlabel!(L"Wavenumber y $[\Omega_c / v_{th}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumx_c.png")
-    heatmap(kys[2:kyind] .* B0 / sqrt(n0), ws[1:wind] .* B0 / sqrt(n0), Z)
+    heatmap(kys[2:kyind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
     xlabel!(L"Wavenumber y $[\Pi / v_{th}]$");
     ylabel!(L"Frequency $[\Pi]$")
     savefig("PIC2D3V_$(FS)_WKsumx_p.png")
@@ -728,26 +749,27 @@ function pic()
 
   @timeit to "Initialisation" begin
     NQ = 1
-    NX = 128 ÷ NQ
-    NY = 128 * NQ
+    NX = 256 ÷ NQ
+    NY = 256 * NQ
     Lx = 1.0
     Ly = Lx * NY / NX
-    P = NX * NY * 2^5
-    NT = 2^14
+    P = NX * NY * 2^4
+    NT = 2^15
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
-    vth = sqrt(n0) * dl
+    debyeoverresolution = 3
+    vth = debyeoverresolution * dl * sqrt(n0)
     B0 = sqrt(n0) / 4;
 
-    ntskip = 4
-    dt = dl/6vth
-    field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt)#, B0x=B0)
-    diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip; makegifs=false)
-    #ntskip = prevpow(2, round(Int, 8 / 6vth))
-    #dt = dl/5 #/6vth
-    #field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-    #  imex=PIC2D3V.Implicit())
-    #diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip)
+    #ntskip = 4
+    #dt = dl/6vth
+    #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
+    #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
+    ntskip = prevpow(2, round(Int, 10 / 6vth))
+    dt = dl/4 #/6vth
+    field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
+      imex=PIC2D3V.Explicit())
+    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip, 2)
     electrons = PIC2D3V.Species(P, vth, n0, PIC2D3V.AreaWeighting();
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
     ions = PIC2D3V.Species(P, vth / sqrt(16), n0, PIC2D3V.AreaWeighting();
