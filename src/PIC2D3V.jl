@@ -3,11 +3,7 @@ module PIC2D3V
 using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Random
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, MuladdMacro, CommonSubexpressions
-using TimerOutputs
-
-FFTW.set_num_threads(Threads.nthreads())
-
-Random.seed!(0)
+using TimerOutputs, StaticNumbers
 
 unimod(x, n) = x > n ? x - n : x > 0 ? x : x + n
 
@@ -535,24 +531,13 @@ end
   return ((unimod(i-1, NZ), a), (i, b), (unimod(i+1, NZ), c)) 
 end
 
-# p=2;c=3.14;
-# x = 0:0.01:10
-# plot(x, deBoor.(x, c - (p+1)/2, p) ./ factorial(p))
-# scatter!(0:10, B.(0:10, c-(p+1)/2, p) ./ factorial(p))
-# plot!([c, c], [0, 1])
-function deBoor(x::T, i::U, p) where {T, U}
-  TU = promote_type(T, U)
-  if p == 0
-    return TU(i <= x < i + 1)
-  else
-    return (x - i) * deBoor(x, i, p - 1) + (i + p + 1 - x) * deBoor(x, i + 1, p - 1)
-  end
-end
-@inline function gridinteractiontuple(::BSplineWeighting{N}, i, r, NZ) where N
-  indices = Float64.(i-N:N+i)
-  fractions = deBoor.(-N:N, r, N) ./ factorial(N)
-  @show zip(unimod.(indices, NZ), fractions)
-  return Tuple{Tuple{Int,Float64}}(zip(unimod.(indices, NZ), fractions))
+
+
+@inline function gridinteractiontuple(::BSplineWeighting{N}, i, r::T, NZ) where {N,T}
+  z = r - (iseven(N) ? 0.5 : 0.0)
+  indices = (-N÷2+i:((N+1)÷2+i))
+  throw(error("totally untested, no to be trusted"))
+  return NTuple{N+1,Tuple{Int,T}}(zip(unimod.(indices, NZ), fractions))
 end
 
 

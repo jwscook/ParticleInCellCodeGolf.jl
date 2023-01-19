@@ -1,7 +1,11 @@
-using ProgressMeter, TimerOutputs, Plots
+using ProgressMeter, TimerOutputs, Plots, FFTW, Random, StaticNumbers
 
 include("PIC2D3V.jl")
 import .PIC2D3V
+
+FFTW.set_num_threads(Threads.nthreads())
+
+Random.seed!(0)
 
 function pic()
 
@@ -9,12 +13,12 @@ function pic()
 
   @timeit to "Initialisation" begin
     NQ = 1
-    NX = 256 ÷ NQ
-    NY = 256 * NQ
+    NX = 512 ÷ NQ
+    NY = 512 * NQ
     Lx = 1.0
     Ly = Lx * NY / NX
     P = NX * NY * 2^3
-    NT = 2^15
+    NT = 2^12
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
     debyeoverresolution = 1
@@ -29,10 +33,12 @@ function pic()
     dt = dl/4 #/6vth
     field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
       imex=PIC2D3V.Implicit())
-    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip, 2)
-    electrons = PIC2D3V.Species(P, vth, n0, PIC2D3V.AreaWeighting();
+    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip, 4)
+    shape = PIC2D3V.BSplineWeighting{@stat(0)}()#PIC2D3V.NGPWeighting();#
+    #shape = PIC2D3V.AreaWeighting();#
+    electrons = PIC2D3V.Species(P, vth, n0, shape;
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
-    ions = PIC2D3V.Species(P, vth / sqrt(16), n0, PIC2D3V.AreaWeighting();
+    ions = PIC2D3V.Species(P, vth / sqrt(16), n0, shape;
       Lx=Lx, Ly=Ly, charge=1, mass=16)
     sort!(electrons, Lx / NX, Ly / NY)
     sort!(ions, Lx / NX, Ly / NY)
