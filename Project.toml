@@ -1,6 +1,9 @@
 [deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CommonSubexpressions = "bbf7d656-a473-5ed7-a52c-81e309532950"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+FastPow = "c0e83750-1142-43a8-81cf-6c956b72b4d1"
+GR = "28b8d3ca-fb5f-59d9-8090-bfdbd6d07a71"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LoopVectorization = "bdcacae8-1622-11e9-2a5c-532679323890"
