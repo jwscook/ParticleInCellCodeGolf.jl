@@ -347,12 +347,11 @@ function loop!(plasma, field::ElectrostaticField, to)
         vz = @view velocities(species)[3, :]
         for i in species.chunks[k]
           Exi, Eyi = field(species.shape, x[i], y[i])
-          vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m/2);
-          x[i] = unimod(x[i] + vx[i]*dt/2, Lx)
-          y[i] = unimod(y[i] + vy[i]*dt/2, Ly)
+          vx0, vy0 = vx[i], vy[i]
+          vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m);
+          x[i] = unimod(x[i] + (vx0 + vx[i])*dt/2, Lx)
+          y[i] = unimod(y[i] + (vy0 + vy[i])*dt/2, Ly)
           deposit!(ρ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
-          x[i] = unimod(x[i] + vx[i]*dt/2, Lx)
-          y[i] = unimod(y[i] + vy[i]*dt/2, Ly)
         end
       end
     end
