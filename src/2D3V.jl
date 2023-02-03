@@ -20,7 +20,7 @@ function pic()
     P = NX * NY * 2^3
     NT = 2^12
     dl = min(Lx / NX, Ly / NY)
-    n0 = 4*pi^2
+    n0 = 4 * pi^2
     debyeoverresolution = 1
     vth = debyeoverresolution * dl * sqrt(n0)
     B0 = sqrt(n0) / 4;
@@ -30,12 +30,12 @@ function pic()
     #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
     ntskip = prevpow(2, round(Int, 10 / 6vth))
-    dt = dl/4 #/6vth
-    field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
+    dt = dl/2 #/6vth
+    field = PIC2D3V.LorenzGaugeField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
       imex=PIC2D3V.Implicit())
-    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip, 4)
-    shape = PIC2D3V.BSplineWeighting{@stat(0)}()#PIC2D3V.NGPWeighting();#
-    #shape = PIC2D3V.AreaWeighting();#
+    diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 1)
+    #shape = PIC2D3V.BSplineWeighting{@stat(0)}()#PIC2D3V.NGPWeighting();#
+    shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vth, n0, shape;
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
     ions = PIC2D3V.Species(P, vth / sqrt(16), n0, shape;
@@ -49,7 +49,6 @@ function pic()
     @show (NT * dt) / (2pi/B0), (2pi/B0) / (dt * ntskip)
     @show (NT * dt) / (2pi/sqrt(n0)),  (2pi/sqrt(n0)) / (dt * ntskip)
   end
-  
   @showprogress 1 for t in 0:NT-1;
     PIC2D3V.loop!(plasma, field, to)
     PIC2D3V.diagnose!(diagnostics, field, plasma, t, to)
