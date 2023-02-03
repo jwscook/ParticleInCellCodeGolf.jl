@@ -347,10 +347,12 @@ function loop!(plasma, field::ElectrostaticField, to)
         vz = @view velocities(species)[3, :]
         for i in species.chunks[k]
           Exi, Eyi = field(species.shape, x[i], y[i])
-          vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m);
-          x[i] = unimod(x[i] + vx[i]*dt, Lx)
-          y[i] = unimod(y[i] + vy[i]*dt, Ly)
+          vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m/2);
+          x[i] = unimod(x[i] + vx[i]*dt/2, Lx)
+          y[i] = unimod(y[i] + vy[i]*dt/2, Ly)
           deposit!(ρ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
+          x[i] = unimod(x[i] + vx[i]*dt/2, Lx)
+          y[i] = unimod(y[i] + vy[i]*dt/2, Ly)
         end
       end
     end
@@ -380,47 +382,18 @@ function loop!(plasma, field::ElectrostaticField, to)
   @timeit to "Field Update" update!(field)
 end
 
-# ∇² f - 1/c^2 ∂ₜ² f = -S
-# ∇² f - ∂ₜ² f = -S
-# ∂ₜ² f = S + k^2 f
-# f⁺ - 2f + f⁻ = Δ² S + Δ² k^2 (θ/2 f⁺ + (1-θ)f + θ/2 *f⁻)
-# f⁺ - 2f + f⁻ = Δ² S + Δ² k^2 θ/2 f⁺ - Δ² k^2 (1-θ)f - Δ² k^2 θ/2 f⁻
-# (1 - Δ² k^2 θ/2) f⁺ = 2f - f⁻ + Δ² S + Δ² k^2 (1-θ)f + Δ² k^2 θ/2 f⁻
-# (1 - Δ² k^2 θ/2) f⁺ = (2 + Δ² k^2 (1-θ)) f - (1 - Δ² k^2 θ/2 ) f⁻ + Δ² S
-# f⁺ = (1 - Δ² k^2 θ/2)⁻¹ (2 + Δ² k^2 (1-θ)) f - (1 - Δ² k^2 θ/2)⁻¹ (1 - Δ² k^2 θ/2) f⁻ + (1 - Δ² k^2 θ/2)⁻¹ Δ² S
-# f⁺ = (1 - Δ² k^2 θ/2)⁻¹ ((2 + Δ² k^2 (1-θ)) f + Δ² S) - f⁻
-
-# Make it more implicit?
-# ∇⋅J = ∂ₜρ
-# ∇⋅J = (ρ⁺ - ρ⁻) / 2 Δt
-# ρ⁺ = 2Δt ∇⋅J + ρ⁻
-# ∂ₜJ = -∇x∇xE - ∂ₜ² E
-# ∂ₜJ = ∇x∇x∇ϕ + ∂ₜ² k ϕ
-# ϕ⁺ - 2ϕ + ϕ⁻ = Δ² S + Δ² k^2 θ/2 ϕ⁺ - Δ² k^2 (1-θ)ϕ - Δ² k^2 θ/2 ϕ⁻
-# S = θ/2 ϕ⁺ + θ/2 ρ⁻ + (1-θ)ρ
-# S = θ/2 (2Δt ∇⋅J + ρ⁻) + θ/2ρ⁻ + (1-θ)ρ
-# S = θΔt ∇⋅J + θ ρ⁻ + (1-θ)ρ
-# ϕ⁺ - 2ϕ + ϕ⁻ = Δ² (θΔt ∇⋅J + θ ρ⁻ + (1-θ)ρ) + 
-#       Δ² k^2 θ/2 ϕ⁺ - Δ² k^2 (1-θ)ϕ - Δ² k^2 θ/2 ϕ⁻
-
-# A⁺ - 2A + A⁻ = Δ² J + Δ² k^2 θ/2 A⁺ - Δ² k^2 (1-θ)A - Δ² k^2 θ/2 A⁻
-# J⁺ = J⁻ + 2Δ (∇x∇x∇ϕ + ∂ₜ² k ϕ)
-# J⁺ = J⁻ + 2Δ (∇x∇x∇ϕ + k (ρ + k^2ϕ))
-
-
-# J = θΔt ∇⋅J + θ ρ⁻ + (1-θ)ρ
-
 @inline denominator(::Explicit, dt, k², θ) = 1
-@inline denominator(::Implicit, dt, k², θ) = 1 - dt^2 * k² / 2
-@inline denominator(::ImEx, dt, k², θ) = 1 - dt^2 * k² * θ / 2
-@inline numerator(::Explicit, dt, k², θ) = 2 + dt^2 * k²
+@inline denominator(::Implicit, dt, k², θ) = 1 + dt^2 * k² / 2
+@inline denominator(::ImEx, dt, k², θ) = 1 + dt^2 * k² * θ / 2
+@inline numerator(::Explicit, dt, k², θ) = 2 - dt^2 * k²
 @inline numerator(::Implicit, dt, k², θ) = 2
-@inline numerator(::ImEx, dt, k², θ) = 2 + dt^2 * k² * (1 - θ)
+@inline numerator(::ImEx, dt, k², θ) = 2 - dt^2 * k² * (1 - θ)
 function lorenzguage!(imex::AbstractImEx, xⁿ, xⁿ⁻¹, sⁿ, k², dt)
   θ = theta(imex)
   @threads for i in eachindex(xⁿ)
-#    xⁿ⁺¹ = 2xⁿ[i] - xⁿ⁻¹[i] + (sⁿ[i] + k²[i] * xⁿ[i]) * dt^2
-    xⁿ⁺¹ = (numerator(imex, dt, k²[i], θ) * xⁿ[i] + dt^2 * sⁿ[i]) / denominator(imex, dt, k²[i], θ) - xⁿ⁻¹[i]
+    num = numerator(imex, dt, k²[i], θ)
+    den = denominator(imex, dt, k²[i], θ)
+    xⁿ⁺¹ = (num * xⁿ[i] + dt^2 * sⁿ[i]) / den - xⁿ⁻¹[i]
     xⁿ⁻¹[i] = xⁿ[i]
     xⁿ[i] = xⁿ⁺¹
   end
@@ -511,34 +484,95 @@ function loop!(plasma, field::LorenzGuageField, to)
   @timeit to "Field Update" update!(field)
 end
 
+
 @inline function depositindicesfractions(s::AbstractShape, z::Float64, NZ::Int,
     NZ_Lz::Float64)
-  zNZ = z * NZ_Lz
-  i = unimod(ceil(Int, zNZ), NZ)
-  r = i - zNZ;
+  zNZ = z * NZ_Lz # floating point position in units of cells
+  i = unimod(ceil(Int, zNZ), NZ) # cell number
+  r = i - zNZ; # distance into cell i in units of cell width
   @assert 0 < r <= 1 "$z, $NZ, $NZ_Lz, $i"
-  return gridinteractiontuple(s, i, 1-r, NZ)
+  return gridinteractiontuple(s, i, r, NZ)
 end
 
 @inline gridinteractiontuple(::NGPWeighting, i, r, NZ) = ((i, 1), )
-@inline gridinteractiontuple(::AreaWeighting, i, r, NZ) = ((i, r), (unimod(i+1, NZ), 1-r))
-@inline function gridinteractiontuple(::BSpline2Weighting, i, r, NZ) 
-  @cse begin
-    a = r^2 / 2
-    b = 0.75 - (r-0.5)^2
-    c = (r-1)^2 / 2
+@inline gridinteractiontuple(::AreaWeighting, i, r, NZ) = ((i, 1-r), (unimod(i+1, NZ), r))
+
+bspline(::BSplineWeighting{@stat N}, x) where N = bspline(BSplineWeighting{Int(N)}(), x)
+
+@inline bspline(::BSplineWeighting{0}, x) = ((1.0),)
+@inline bspline(::BSplineWeighting{1}, x) = (x, 1-x)
+function bspline(::BSplineWeighting{2}, x)
+  (9/8 + 3/2*(x-1.5) + 1/2*(x-1.5)^2,
+   3/4               -     (x-0.5)^2,
+   9/8 - 3/2*(x+0.5) + 1/2*(x+0.5)^2)
+end
+function bspline(::BSplineWeighting{3}, x)
+  (4/3 + 2*(x-2) + (x-2)^2 + 1/6*(x-2)^3,
+   2/3           - (x-1)^2 - 1/2*(x-1)^3,
+   2/3           - (x  )^2 + 1/2*(x  )^3,
+   4/3 - 2*(x+1) + (x+1)^2 - 1/6*(x+1)^3)
+end
+function bspline(::BSplineWeighting{4}, x)
+  (625/384 + 125/48*(x-2.5) + 25/16*(x-2.5)^2 + 5/12*(x-2.5)^3 + 1/24*(x-2.5)^4,
+   55/96   -   5/24*(x-1.5) -   5/4*(x-1.5)^2 -  5/6*(x-1.5)^3 -  1/6*(x-1.5)^4,
+   115/192                  -   5/8*(x-0.5)^2                  +  1/4*(x-0.5)^4,
+   55/96   +   5/24*(x+0.5) -   5/4*(x+0.5)^2 +  5/6*(x+0.5)^3 -  1/6*(x+0.5)^4,
+   625/384 - 125/48*(x+1.5) + 25/16*(x+1.5)^2 - 5/12*(x+1.5)^3 + 1/24*(x+1.5)^4)
+end
+function bspline(::BSplineWeighting{5}, x)
+  (243/120 + 81/24*(x-3) + 9/4*(x-3)^2 + 3/4*(x-3)^3 + 1/8*(x-3)^4 + 1/120*(x-3)^5,
+   17/40   -   5/8*(x-2) - 7/4*(x-2)^2 - 5/4*(x-2)^3 - 3/8*(x-2)^4 -  1/24*(x-2)^5,
+   22/40                 - 1/2*(x-1)^2               + 1/4*(x-1)^4 +  1/12*(x-1)^5,
+   22/40                 - 1/2*(x+0)^2               + 1/4*(x-0)^4 -  1/12*(x-0)^5,
+   17/40   +   5/8*(x+1) - 7/4*(x+1)^2 + 5/4*(x+1)^3 - 3/8*(x+1)^4 +  1/24*(x+1)^5,
+   243/120 - 81/24*(x+2) + 9/4*(x+2)^2 - 3/4*(x+2)^3 + 1/8*(x+2)^4 - 1/120*(x+2)^5)
+end
+
+@inline indices(::BSplineWeighting{N}, i) where N = (i-fld(N, 2)):(i+cld(N, 2))
+
+@inline function gridinteractiontuple(s::BSplineWeighting{N}, i, centre::T, NZ
+    ) where {N,T}
+  (j, z) = if isodd(N)
+    (i, 1 - centre)
+  else
+    q = centre > 0.5
+    (i + q, q + 0.5 - centre)
   end
-  return ((unimod(i-1, NZ), a), (i, b), (unimod(i+1, NZ), c)) 
+  inds = indices(s, j)
+  fractions = bspline(s, z)
+  #@assert sum(fractions) ≈ 1 "$(sum(fractions)), $fractions"
+  if (inds[1] < 1) || (inds[end] > NZ)
+    return zip(unimod.(inds, NZ), fractions)
+  else
+    return zip(inds, fractions)
+  end
 end
 
-
-
-@inline function gridinteractiontuple(::BSplineWeighting{N}, i, r::T, NZ) where {N,T}
-  z = r - (iseven(N) ? 0.5 : 0.0)
-  indices = (-N÷2+i:((N+1)÷2+i))
-  throw(error("totally untested, no to be trusted"))
-  return NTuple{N+1,Tuple{Int,T}}(zip(unimod.(indices, NZ), fractions))
-end
+# NG = 64
+# x = 1/NG/2:1/NG:1-1/NG/2
+# h = plot(xticks=0:23)
+# for N in 0:5
+#   for i in 1:N+1
+#     plot!(h, x .+ i .- 1, [bspline(BS{N}(), xi)[i] for xi in x], label="$N,$i")
+#   end
+# end
+#
+# for N in 0:5
+#   for _ in 1:4
+#     cell = rand(10:20)
+#     dist = rand()
+#     plot!(h, [cell + dist, cell + dist], [0, 1])
+#     xc = (N+1)/2
+#     for i in 1:N+1
+#       plot!(h, x .+ i .- 1 .- xc .+ cell .+ dist,
+#        [bspline(BS{N}(), xi)[i] for xi in x], label="$N,$i", legend=false)
+#     end
+#     for (a, b) in git(BS{N}(), cell, dist, 32)
+#       scatter!(h, [a], [b])
+#     end
+#   end
+# end
+# h
 
 
 @inline function (f::ElectrostaticField)(s::AbstractShape, xi, yi)

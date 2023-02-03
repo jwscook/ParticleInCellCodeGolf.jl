@@ -12,13 +12,13 @@ function pic()
   to = TimerOutput()
 
   @timeit to "Initialisation" begin
-    NQ = 1
-    NX = 512 ÷ NQ
-    NY = 512 * NQ
+    NQ = 4
+    NX = 128 ÷ NQ
+    NY = 128 * NQ
     Lx = 1.0
     Ly = Lx * NY / NX
     P = NX * NY * 2^3
-    NT = 2^12
+    NT = 2^15
     dl = min(Lx / NX, Ly / NY)
     n0 = 4*pi^2
     debyeoverresolution = 1
@@ -30,11 +30,11 @@ function pic()
     #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
     ntskip = prevpow(2, round(Int, 10 / 6vth))
-    dt = dl/4 #/6vth
+    dt = dl/2 #/6vth
     field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-      imex=PIC2D3V.Implicit())
-    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip, 4)
-    shape = PIC2D3V.BSplineWeighting{@stat(0)}()#PIC2D3V.NGPWeighting();#
+      imex=PIC2D3V.Explicit())
+    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip, 2)
+    shape = PIC2D3V.BSplineWeighting{(@stat 5)}()#PIC2D3V.NGPWeighting();#
     #shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vth, n0, shape;
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
