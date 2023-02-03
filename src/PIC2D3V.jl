@@ -650,15 +650,13 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to
         @timeit to "Momentum" begin
           px, py, pz = 0.0, 0.0, 0.0
           for i in eachindex(f.Ex)
-            px += real(f.Ey[i] * f.Bz[i] - f.Ez[i] * f.By[i])
-            py += real(f.Ez[i] * f.Bx[i] - f.Ex[i] * f.Bz[i])
-            pz += real(f.Ex[i] * f.By[i] - f.Ey[i] * f.Bx[i])
+            px += real(f.Ey[i]) * real(f.Bz[i]) - real(f.Ez[i]) * real(f.By[i])
+            py += real(f.Ez[i]) * real(f.Bx[i]) - real(f.Ex[i]) * real(f.Bz[i])
+            pz += real(f.Ex[i]) * real(f.By[i]) - real(f.Ey[i]) * real(f.Bx[i])
           end
           d.fieldmomentum[ti] .= (px, py, pz) ./ length(f.Ex)
         end
       end
-      a = 1:d.ngskip:size(f.Ex, 1)
-      b = 1:d.ngskip:size(f.Ex, 2)
       @timeit to "Field ifft!" begin
         f.ffthelper.pifft! * f.Ax
         f.ffthelper.pifft! * f.Ay
@@ -666,18 +664,23 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to
         f.ffthelper.pifft! * f.ϕ
       end
       @timeit to "Field averaging" begin
-        for (jl, jr) in enumerate(b), (il, ir) in enumerate(a)
-          d.Exs[il, jl, ti] += real(f.Ex[ir, jr]) / d.ntskip
-          d.Eys[il, jl, ti] += real(f.Ey[ir, jr]) / d.ntskip
-          d.Ezs[il, jl, ti] += real(f.Ez[ir, jr]) / d.ntskip
-          d.Bxs[il, jl, ti] += real(f.Bx[ir, jr]) / d.ntskip
-          d.Bys[il, jl, ti] += real(f.By[ir, jr]) / d.ntskip
-          d.Bzs[il, jl, ti] += real(f.Bz[ir, jr]) / d.ntskip
-          d.Axs[il, jl, ti] += real.(f.Ax[ir,jr]) / d.ntskip
-          d.Ays[il, jl, ti] += real.(f.Ay[ir,jr]) / d.ntskip
-          d.Azs[il, jl, ti] += real.(f.Az[ir,jr]) / d.ntskip
-          d.ϕs[il, jl, ti] += real.(f.ϕ[ir,jr]) / d.ntskip
+        function average!(lhs, rhs)
+          a = 1:d.ngskip:size(lhs, 1)
+          b = 1:d.ngskip:size(lhs, 2)
+          for (jl, jr) in enumerate(b), (il, ir) in enumerate(a)
+            lhs[il, jl, ti] += real(rhs[ir, jr]) / d.ntskip
+          end
         end
+        average!(d.Exs, f.Ex)
+        average!(d.Eys, f.Ey)
+        average!(d.Ezs, f.Ez)
+        average!(d.Bxs, f.Bx)
+        average!(d.Bys, f.By)
+        average!(d.Bzs, f.Bz)
+        average!(d.Axs, f.Ax)
+        average!(d.Ays, f.Ay)
+        average!(d.Azs, f.Az)
+        average!(d.ϕs, f.ϕ)
       end
       @timeit to "Field fft!" begin
         f.ffthelper.pfft! * f.Ax
