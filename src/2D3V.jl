@@ -20,7 +20,7 @@ function pic()
     P = NX * NY * 2^3
     NT = 2^15
     dl = min(Lx / NX, Ly / NY)
-    n0 = 4*pi^2
+    n0 = 4 * pi^2
     debyeoverresolution = 1
     vth = debyeoverresolution * dl * sqrt(n0)
     B0 = sqrt(n0) / 4;
@@ -49,7 +49,6 @@ function pic()
     @show (NT * dt) / (2pi/B0), (2pi/B0) / (dt * ntskip)
     @show (NT * dt) / (2pi/sqrt(n0)),  (2pi/sqrt(n0)) / (dt * ntskip)
   end
-  
   @showprogress 1 for t in 0:NT-1;
     PIC2D3V.loop!(plasma, field, to)
     PIC2D3V.diagnose!(diagnostics, field, plasma, t, to)

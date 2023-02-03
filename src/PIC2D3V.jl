@@ -82,7 +82,7 @@ function ElectrostaticDiagnostics(NX, NY, NT, ntskip, ngskip=1; makegifs=false)
     fieldstorage..., ntskip, ngskip, Ref(0), makegifs)
 end
 
-struct LorenzGuageDiagnostics <: AbstractDiagnostics
+struct LorenzGaugeDiagnostics <: AbstractDiagnostics
   kineticenergy::Array{Float64, 1}
   fieldenergy::Array{Float64, 1}
   particlemomentum::Vector{Vector{Float64}}
@@ -103,13 +103,13 @@ struct LorenzGuageDiagnostics <: AbstractDiagnostics
   makegifs::Bool
 end
 
-function LorenzGuageDiagnostics(NX, NY, NT::Int, ntskip::Int, ngskip=1;
+function LorenzGaugeDiagnostics(NX, NY, NT::Int, ntskip::Int, ngskip=1;
                                 makegifs=false)
   @assert NT >= ntskip
   @assert ispow2(ngskip)
   scalarstorage, momentumstorage, fieldstorage = generatestorage(
     NX÷ngskip, NY÷ngskip, NT÷ntskip, 2, 2, 10)
-  return LorenzGuageDiagnostics(scalarstorage..., momentumstorage...,
+  return LorenzGaugeDiagnostics(scalarstorage..., momentumstorage...,
     fieldstorage..., ntskip, ngskip, Ref(0), makegifs)
 end
 
@@ -199,8 +199,8 @@ end
 function FFTHelper(NX, NY, Lx, Ly)
   kx=2π/Lx*vcat(0:NX÷2-1,-NX÷2:-1);
   ky=2π/Ly*vcat(0:NY÷2-1,-NY÷2:-1)';
-  kk = -(kx.^2 .+ ky.^2)
-  im_k⁻²= im ./ kk
+  kk = (kx.^2 .+ ky.^2)
+  im_k⁻²= -im ./ kk
   im_k⁻²[1, 1] = 0
   z = zeros(ComplexF64, NX, NY)
   pfft! = plan_fft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
@@ -245,7 +245,7 @@ struct ImEx <: AbstractImEx
 end
 
 
-struct LorenzGuageField{T, U} <: AbstractField
+struct LorenzGaugeField{T, U} <: AbstractField
   imex::T
   ρJs::Array{Float64, 4}
   ϕ::Array{ComplexF64, 2}
@@ -273,13 +273,13 @@ struct LorenzGuageField{T, U} <: AbstractField
   boris::ElectromagneticBoris
 end
 
-function LorenzGuageField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
+function LorenzGaugeField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
     imex::AbstractImEx=Explicit())
   EBxyz=zeros(6, NX, NY);
   gps = GridParameters(Lx, Ly, NX, NY)
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   boris = ElectromagneticBoris(dt)
-  return LorenzGuageField(imex, zeros(4, NX, NY, nthreads()),
+  return LorenzGaugeField(imex, zeros(4, NX, NY, nthreads()),
     (zeros(ComplexF64, NX, NY) for _ in 1:18)..., EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
 end
@@ -288,7 +288,7 @@ theta(::Explicit) = 0
 theta(imex::ImEx) = imex.θ
 theta(::Implicit) = 1
 
-function update!(f::LorenzGuageField)
+function update!(f::LorenzGaugeField)
   f.EBxyz[1, :, :] .= real.(f.Ex)
   f.EBxyz[2, :, :] .= real.(f.Ey)
   f.EBxyz[3, :, :] .= real.(f.Ez)
@@ -415,7 +415,7 @@ end
 # push v⁰ to v⁺ with Eʰ and Bʰ
 # push xʰ to x⁺ with v⁺
 # 4) copy fields into buffers for next loop
-function loop!(plasma, field::LorenzGuageField, to)
+function loop!(plasma, field::LorenzGaugeField, to)
   dt = timestep(field)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
   NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
@@ -432,11 +432,17 @@ function loop!(plasma, field::LorenzGuageField, to)
         vy = @view velocities(species)[2, :]
         vz = @view velocities(species)[3, :]
         for i in species.chunks[j]
+          # x and v are known at the nth timestep, E and B fields are (n+1/2)th
           Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
-          vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi, Bxi,
-                                      Byi, Bzi, q_m);
-          x[i] = unimod(x[i] + vx[i]*dt, Lx)
-          y[i] = unimod(y[i] + vy[i]*dt, Ly)
+          vxi = vx[i] # store for later use in v at (n+1/2)
+          vyi = vy[i] # store for later use in v at (n+1/2)
+          # accelerate velocities from n to (n+1)
+          vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+            Bxi, Byi, Bzi, q_m);
+          # spatial advection, effectively using v at (n+1/2)
+          x[i] = unimod(x[i] + (vxi + vx[i]) / 2 * dt, Lx)
+          y[i] = unimod(y[i] + (vyi + vy[i]) / 2 * dt, Ly)
+          # now deposit at (n+1)th timestep
           deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
                    qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
         end
@@ -457,10 +463,13 @@ function loop!(plasma, field::LorenzGuageField, to)
     field.Jx[1, 1] = 0
     field.Jy[1, 1] = 0
     field.Jz[1, 1] = 0
+    # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
     lorenzguage!(field.imex, field.ϕ, field.ϕ⁻, field.ρ, field.ffthelper.k², dt)
     lorenzguage!(field.imex, field.Ax, field.Ax⁻, field.Jx, field.ffthelper.k², dt)
     lorenzguage!(field.imex, field.Ay, field.Ay⁻, field.Jy, field.ffthelper.k², dt)
     lorenzguage!(field.imex, field.Az, field.Az⁻, field.Jz, field.ffthelper.k², dt)
+    # at this point ϕ stores the (n+1)th timestep value and ϕ⁻ the nth
+    # Now calculate the value of E and B at n+1/2
     # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
     # Bʰ = ∇x(A⁺ + A⁰)/2
     @. field.Ex = -im * field.ffthelper.kx * (field.ϕ + field.ϕ⁻) / 2
@@ -589,7 +598,7 @@ end
   return (Ex, Ey)
 end
 
-@inline function (f::LorenzGuageField)(s::AbstractShape, xi, yi)
+@inline function (f::LorenzGaugeField)(s::AbstractShape, xi, yi)
   NX, NY = f.gridparams.NX, f.gridparams.NY
   NX_Lx, NY_Ly = f.gridparams.NX_Lx, f.gridparams.NY_Ly
   Ex = Ey = Ez = Bx = By = Bz = zero(eltype(f.EBxyz))
@@ -650,7 +659,6 @@ function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
       ti = d.ti[]
       if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.Exy) / 2
-        #@show d.fieldenergy[ti], d.kineticenergy[ti]
       end
       a = 1:d.ngskip:size(f.Ex, 1)
       b = 1:d.ngskip:size(f.Ex, 2)
@@ -662,7 +670,7 @@ function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
   end
 end
 
-function diagnose!(d::LorenzGuageDiagnostics, f::LorenzGuageField, plasma, t, to)
+function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to)
   @timeit to "Diagnostics" begin
     t % d.ntskip == 0 && (d.ti[] += 1)
     if t % d.ntskip == 0
@@ -671,27 +679,50 @@ function diagnose!(d::LorenzGuageDiagnostics, f::LorenzGuageField, plasma, t, to
     @timeit to "Fields" begin
       ti = d.ti[]
       if t % d.ntskip == 0
-        d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
-        d.fieldmomentum[ti] .= (
-          mean(real.(f.Ey .* f.Bz .- f.Ez .* f.By)),
-          mean(real.(f.Ez .* f.Bx .- f.Ex .* f.Bz)),
-          mean(real.(f.Ex .* f.By .- f.Ey .* f.Bx)))
-        #@show d.fieldenergy[ti], d.kineticenergy[ti]
+        @timeit to "Energy" begin
+          d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
+        end
+        @timeit to "Momentum" begin
+          px, py, pz = 0.0, 0.0, 0.0
+          for i in eachindex(f.Ex)
+            px += real(f.Ey[i]) * real(f.Bz[i]) - real(f.Ez[i]) * real(f.By[i])
+            py += real(f.Ez[i]) * real(f.Bx[i]) - real(f.Ex[i]) * real(f.Bz[i])
+            pz += real(f.Ex[i]) * real(f.By[i]) - real(f.Ey[i]) * real(f.Bx[i])
+          end
+          d.fieldmomentum[ti] .= (px, py, pz) ./ length(f.Ex)
+        end
       end
-      a = 1:d.ngskip:size(f.Ex, 1)
-      b = 1:d.ngskip:size(f.Ex, 2)
-      for (jl, jr) in enumerate(b), (il, ir) in enumerate(a)
-        d.Exs[il, jl, ti] += real(f.Ex[ir, jr]) / d.ntskip
-        d.Eys[il, jl, ti] += real(f.Ey[ir, jr]) / d.ntskip
-        d.Ezs[il, jl, ti] += real(f.Ez[ir, jr]) / d.ntskip
-        d.Bxs[il, jl, ti] += real(f.Bx[ir, jr]) / d.ntskip
-        d.Bys[il, jl, ti] += real(f.By[ir, jr]) / d.ntskip
-        d.Bzs[il, jl, ti] += real(f.Bz[ir, jr]) / d.ntskip
+      @timeit to "Field ifft!" begin
+        f.ffthelper.pifft! * f.Ax
+        f.ffthelper.pifft! * f.Ay
+        f.ffthelper.pifft! * f.Az
+        f.ffthelper.pifft! * f.ϕ
       end
-      @views d.Axs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ax)[a,b] ./ d.ntskip;
-      @views d.Ays[:, :, ti] .+= real.(f.ffthelper.pifft * f.Ay)[a,b] ./ d.ntskip;
-      @views d.Azs[:, :, ti] .+= real.(f.ffthelper.pifft * f.Az)[a,b] ./ d.ntskip;
-      @views d.ϕs[:, :, ti] .+= real.(f.ffthelper.pifft * f.ϕ)[a,b] ./ d.ntskip
+      @timeit to "Field averaging" begin
+        function average!(lhs, rhs)
+          a = 1:d.ngskip:size(lhs, 1)
+          b = 1:d.ngskip:size(lhs, 2)
+          for (jl, jr) in enumerate(b), (il, ir) in enumerate(a)
+            lhs[il, jl, ti] += real(rhs[ir, jr]) / d.ntskip
+          end
+        end
+        average!(d.Exs, f.Ex)
+        average!(d.Eys, f.Ey)
+        average!(d.Ezs, f.Ez)
+        average!(d.Bxs, f.Bx)
+        average!(d.Bys, f.By)
+        average!(d.Bzs, f.Bz)
+        average!(d.Axs, f.Ax)
+        average!(d.Ays, f.Ay)
+        average!(d.Azs, f.Az)
+        average!(d.ϕs, f.ϕ)
+      end
+      @timeit to "Field fft!" begin
+        f.ffthelper.pfft! * f.Ax
+        f.ffthelper.pfft! * f.Ay
+        f.ffthelper.pfft! * f.Az
+        f.ffthelper.pfft! * f.ϕ
+      end
     end
   end
 end
@@ -700,7 +731,7 @@ function diagnosticfields(d::ElectrostaticDiagnostics)
   return ((d.Exs, "Ex"), (d.Eys, "Ey"), (d.ϕs, "ϕ"))
 end
 
-function diagnosticfields(d::LorenzGuageDiagnostics)
+function diagnosticfields(d::LorenzGaugeDiagnostics)
   return ((d.Exs, "Ex"), (d.Eys, "Ey"), (d.Ezs, "Ez"),
           (d.Bxs, "Bx"), (d.Bys, "By"), (d.Bzs, "Bz"),
           (d.Axs, "Ax"), (d.Ays, "Ay"), (d.Azs, "Az"),
