@@ -31,11 +31,11 @@ function pic()
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
     ntskip = prevpow(2, round(Int, 10 / 6vth))
     dt = dl/2 #/6vth
-    field = PIC2D3V.LorenzGuageField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
+    field = PIC2D3V.LorenzGaugeField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
       imex=PIC2D3V.Explicit())
-    diagnostics = PIC2D3V.LorenzGuageDiagnostics(NX, NY, NT, ntskip, 2)
-    shape = PIC2D3V.BSplineWeighting{(@stat 5)}()#PIC2D3V.NGPWeighting();#
-    #shape = PIC2D3V.AreaWeighting();#
+    diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 2)
+    #shape = PIC2D3V.BSplineWeighting{(@stat 5)}()#PIC2D3V.NGPWeighting();#
+    shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vth, n0, shape;
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
     ions = PIC2D3V.Species(P, vth / sqrt(16), n0, shape;
