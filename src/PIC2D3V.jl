@@ -180,9 +180,13 @@ struct GridParameters
   ΔY::Float64
   NX_Lx::Float64
   NY_Ly::Float64
+  xs::Vector{Float64}
+  ys::LinearAlgebra.Adjoint{Float64, Vector{Float64}}
 end
 function GridParameters(Lx, Ly, NX, NY)
-  return GridParameters(Lx, Ly, NX, NY, 1/NX, 1/NY, NX / Lx, NY / Ly)
+  xs = collect(Lx .* (0.5:NX));
+  ys = collect(Ly .* (0.5:NY))';
+  return GridParameters(Lx, Ly, NX, NY, Lx/NX, Ly/NY, NX / Lx, NY / Ly, xs, ys)
 end
 
 cellvolume(g::GridParameters) = g.ΔX * g.ΔY
@@ -197,16 +201,16 @@ struct FFTHelper{T, U, V}
   pifft::V
 end
 function FFTHelper(NX, NY, Lx, Ly)
-  kx=2π/Lx*vcat(0:NX÷2-1,-NX÷2:-1);
-  ky=2π/Ly*vcat(0:NY÷2-1,-NY÷2:-1)';
-  kk = (kx.^2 .+ ky.^2)
-  im_k⁻²= -im ./ kk
+  kx = 2π / Lx * vcat(0:NX÷2-1, -NX÷2:-1);
+  ky = 2π / Ly * vcat(0:NY÷2-1, -NY÷2:-1)';
+  k² = (kx.^2 .+ ky.^2)
+  im_k⁻² = -im ./ k²
   im_k⁻²[1, 1] = 0
   z = zeros(ComplexF64, NX, NY)
   pfft! = plan_fft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
   pifft! = plan_ifft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
   pifft = plan_ifft(z; flags=FFTW.ESTIMATE, timelimit=Inf)
-  return FFTHelper(kx, ky, kk, im_k⁻², pfft!, pifft!, pifft)
+  return FFTHelper(kx, ky, k², im_k⁻², pfft!, pifft!, pifft)
 end
 
 
@@ -271,6 +275,7 @@ struct LorenzGaugeField{T, U} <: AbstractField
   gridparams::GridParameters
   ffthelper::U
   boris::ElectromagneticBoris
+  dt::Float64
 end
 
 function LorenzGaugeField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
@@ -281,7 +286,7 @@ function LorenzGaugeField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
   boris = ElectromagneticBoris(dt)
   return LorenzGaugeField(imex, zeros(4, NX, NY, nthreads()),
     (zeros(ComplexF64, NX, NY) for _ in 1:18)..., EBxyz,
-    Float64.((B0x, B0y, B0z)), gps, ffthelper, boris)
+    Float64.((B0x, B0y, B0z)), gps, ffthelper, boris, dt)
 end
 
 theta(::Explicit) = 0
@@ -296,7 +301,6 @@ function update!(f::LorenzGaugeField)
   f.EBxyz[5, :, :] .= real.(f.By) .+ f.B0[2]
   f.EBxyz[6, :, :] .= real.(f.Bz) .+ f.B0[3]
 end
-
 
 function reduction!(a, z)
   @. a = 0.0
@@ -329,7 +333,7 @@ end
 # ϕ = ρ / (kx^2 + ky^2)
 # Ex = - ∇_x ϕ = - i kx ϕ = - i kx ρ / (kx^2 + ky^2)
 # Ey = - ∇_y ϕ = - i ky ϕ = - i ky ρ / (kx^2 + ky^2)
-function loop!(plasma, field::ElectrostaticField, to)
+function loop!(plasma, field::ElectrostaticField, to, t)
   dt = timestep(field)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
   NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
@@ -347,10 +351,10 @@ function loop!(plasma, field::ElectrostaticField, to)
         vz = @view velocities(species)[3, :]
         for i in species.chunks[k]
           Exi, Eyi = field(species.shape, x[i], y[i])
-          vx0, vy0 = vx[i], vy[i]
+          vxi, vyi = vx[i], vy[i]
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, q_m);
-          x[i] = unimod(x[i] + (vx0 + vx[i])*dt/2, Lx)
-          y[i] = unimod(y[i] + (vy0 + vy[i])*dt/2, Ly)
+          x[i] = unimod(x[i] + (vxi + vx[i])/2*dt, Lx)
+          y[i] = unimod(y[i] + (vyi + vy[i])/2*dt, Ly)
           deposit!(ρ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
         end
       end
@@ -381,18 +385,20 @@ function loop!(plasma, field::ElectrostaticField, to)
   @timeit to "Field Update" update!(field)
 end
 
-@inline denominator(::Explicit, dt, k², θ) = 1
-@inline denominator(::Implicit, dt, k², θ) = 1 + dt^2 * k² / 2
-@inline denominator(::ImEx, dt, k², θ) = 1 + dt^2 * k² * θ / 2
-@inline numerator(::Explicit, dt, k², θ) = 2 - dt^2 * k²
-@inline numerator(::Implicit, dt, k², θ) = 2
-@inline numerator(::ImEx, dt, k², θ) = 2 - dt^2 * k² * (1 - θ)
-function lorenzguage!(imex::AbstractImEx, xⁿ, xⁿ⁻¹, sⁿ, k², dt)
-  θ = theta(imex)
+@inline denominator(::Explicit, dt², k²) = 1
+@inline denominator(::Implicit, dt², k²) = 1 + dt² * k² / 2
+@inline denominator(imex::ImEx, dt², k²) = 1 + dt² * k² * theta(imex) / 2
+@inline numerator(::Explicit, dt², k²) = 2 - dt² * k²
+@inline numerator(::Implicit, dt², k²) = 2
+@inline numerator(imex::ImEx, dt², k²) = 2 - dt² * k² * (1 - theta(imex))
+# ∇^2 f - ∂ₜ² f = - s
+# -k² f - (f⁺ - 2f⁰ + f⁻)/Δt^2 = - s
+# Explicit f⁺ = (2 - k²Δt^2)f⁰ - f⁻ + Δt^2 s
+function lorenzgauge!(imex::AbstractImEx, xⁿ, xⁿ⁻¹, sⁿ, k², dt²)
   @threads for i in eachindex(xⁿ)
-    num = numerator(imex, dt, k²[i], θ)
-    den = denominator(imex, dt, k²[i], θ)
-    xⁿ⁺¹ = (num * xⁿ[i] + dt^2 * sⁿ[i]) / den - xⁿ⁻¹[i]
+    num = numerator(imex, dt², k²[i])
+    den = denominator(imex, dt², k²[i])
+    xⁿ⁺¹ = (num * xⁿ[i] + dt² * sⁿ[i]) / den - xⁿ⁻¹[i]
     xⁿ⁻¹[i] = xⁿ[i]
     xⁿ[i] = xⁿ⁺¹
   end
@@ -402,10 +408,10 @@ end
 # B = ∇xA
 # ∇² A - 1/c^2 ∂ₜ² A = -μ₀ J⁰
 # ∇² ϕ - 1/c^2 ∂ₜ² ϕ = -ρ⁰ / ϵ₀
-# im^2 k^2 * ϕ - dt^2/c^2 (ϕ⁺ - 2ϕ⁰ + ϕ⁻) =  -ρ / ϵ₀
+# im^2 k^2 * ϕ - 1/dt^2/c^2 (ϕ⁺ - 2ϕ⁰ + ϕ⁻) =  -ρ / ϵ₀
 # 1) Calculate ϕ⁺ and A⁺ (ϕ and A at next timestep, n+1)
-# ϕ⁺ = 2ϕ⁰ - ϕ⁻ + (ρ / ϵ₀ - k^2 * ϕ⁰)*c^2/dt^2
-# A⁺ = 2A⁰ - A⁻ + (J μ₀ - k^2 * A⁰)*c^2/dt^2
+# ϕ⁺ = 2ϕ⁰ - ϕ⁻ + (ρ / ϵ₀ - k^2 * ϕ⁰)*c^2*dt^2
+# A⁺ = 2A⁰ - A⁻ + (J μ₀ - k^2 * A⁰)*c^2*dt^2
 # 2) calculate the half timstep n+1/2
 # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
 # Bʰ = ∇x(A⁺ + A⁰)/2
@@ -414,7 +420,7 @@ end
 # push v⁰ to v⁺ with Eʰ and Bʰ
 # push xʰ to x⁺ with v⁺
 # 4) copy fields into buffers for next loop
-function loop!(plasma, field::LorenzGaugeField, to)
+function loop!(plasma, field::LorenzGaugeField, to, t)
   dt = timestep(field)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
   NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
@@ -462,12 +468,23 @@ function loop!(plasma, field::LorenzGaugeField, to)
     field.Jx[1, 1] = 0
     field.Jy[1, 1] = 0
     field.Jz[1, 1] = 0
+    #if t == 0
+    #  field.ϕ⁻ .= 0.0
+    #  field.ϕ .= 0.0
+    #  field.ϕ⁻[end÷2, end÷2] = 1.0
+    #  #field.ϕ[end÷2, end÷2] = 1.0
+    #  #field.ffthelper.pfft! * field.ϕ⁻
+    #  #field.ffthelper.pfft! * field.ϕ
+    #  #field.ϕ⁻[1, 1] *= 0.0
+    #  #field.ϕ⁻[10, 10] = 1.0
+    #  #field.ϕ[10, 10] = 1.0
+    #end
     # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
-    lorenzguage!(field.imex, field.ϕ, field.ϕ⁻, field.ρ, field.ffthelper.k², dt)
-    lorenzguage!(field.imex, field.Ax, field.Ax⁻, field.Jx, field.ffthelper.k², dt)
-    lorenzguage!(field.imex, field.Ay, field.Ay⁻, field.Jy, field.ffthelper.k², dt)
-    lorenzguage!(field.imex, field.Az, field.Az⁻, field.Jz, field.ffthelper.k², dt)
-    # at this point ϕ stores the (n+1)th timestep value and ϕ⁻ the nth
+    lorenzgauge!(field.imex, field.ϕ, field.ϕ⁻, field.ρ, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ax, field.Ax⁻, field.Jx, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ay, field.Ay⁻, field.Jy, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Az, field.Az⁻, field.Jz, field.ffthelper.k², dt^2)
+    # at this point (ϕ, Ai) stores the (n+1)th timestep value and (ϕ⁻, Ai⁻) the nth
     # Now calculate the value of E and B at n+1/2
     # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
     # Bʰ = ∇x(A⁺ + A⁰)/2
@@ -510,30 +527,42 @@ bspline(::BSplineWeighting{@stat N}, x) where N = bspline(BSplineWeighting{Int(N
 @inline bspline(::BSplineWeighting{0}, x) = ((1.0),)
 @inline bspline(::BSplineWeighting{1}, x) = (x, 1-x)
 function bspline(::BSplineWeighting{2}, x)
-  (9/8 + 3/2*(x-1.5) + 1/2*(x-1.5)^2,
-   3/4               -     (x-0.5)^2,
-   9/8 - 3/2*(x+0.5) + 1/2*(x+0.5)^2)
+  @cse begin
+    a = 9/8 + 3/2*(x-1.5) + 1/2*(x-1.5)^2
+    b = 3/4               -     (x-0.5)^2
+    c = 9/8 - 3/2*(x+0.5) + 1/2*(x+0.5)^2
+  end
+  return (a, b, c)
 end
 function bspline(::BSplineWeighting{3}, x)
-  (4/3 + 2*(x-2) + (x-2)^2 + 1/6*(x-2)^3,
-   2/3           - (x-1)^2 - 1/2*(x-1)^3,
-   2/3           - (x  )^2 + 1/2*(x  )^3,
-   4/3 - 2*(x+1) + (x+1)^2 - 1/6*(x+1)^3)
+  @cse begin
+    a = 4/3 + 2*(x-2) + (x-2)^2 + 1/6*(x-2)^3
+    b = 2/3           - (x-1)^2 - 1/2*(x-1)^3
+    c = 2/3           - (x  )^2 + 1/2*(x  )^3
+    d = 4/3 - 2*(x+1) + (x+1)^2 - 1/6*(x+1)^3
+  end
+  return (a, b, c, d)
 end
 function bspline(::BSplineWeighting{4}, x)
-  (625/384 + 125/48*(x-2.5) + 25/16*(x-2.5)^2 + 5/12*(x-2.5)^3 + 1/24*(x-2.5)^4,
-   55/96   -   5/24*(x-1.5) -   5/4*(x-1.5)^2 -  5/6*(x-1.5)^3 -  1/6*(x-1.5)^4,
-   115/192                  -   5/8*(x-0.5)^2                  +  1/4*(x-0.5)^4,
-   55/96   +   5/24*(x+0.5) -   5/4*(x+0.5)^2 +  5/6*(x+0.5)^3 -  1/6*(x+0.5)^4,
-   625/384 - 125/48*(x+1.5) + 25/16*(x+1.5)^2 - 5/12*(x+1.5)^3 + 1/24*(x+1.5)^4)
+  @cse begin
+    a = 625/384 + 125/48*(x-2.5) + 25/16*(x-2.5)^2 + 5/12*(x-2.5)^3 + 1/24*(x-2.5)^4
+    b = 55/96   -   5/24*(x-1.5) -   5/4*(x-1.5)^2 -  5/6*(x-1.5)^3 -  1/6*(x-1.5)^4
+    c = 115/192                  -   5/8*(x-0.5)^2                  +  1/4*(x-0.5)^4
+    d = 55/96   +   5/24*(x+0.5) -   5/4*(x+0.5)^2 +  5/6*(x+0.5)^3 -  1/6*(x+0.5)^4
+    e = 625/384 - 125/48*(x+1.5) + 25/16*(x+1.5)^2 - 5/12*(x+1.5)^3 + 1/24*(x+1.5)^4
+  end
+  return (a, b, c, d, e)
 end
 function bspline(::BSplineWeighting{5}, x)
-  (243/120 + 81/24*(x-3) + 9/4*(x-3)^2 + 3/4*(x-3)^3 + 1/8*(x-3)^4 + 1/120*(x-3)^5,
-   17/40   -   5/8*(x-2) - 7/4*(x-2)^2 - 5/4*(x-2)^3 - 3/8*(x-2)^4 -  1/24*(x-2)^5,
-   22/40                 - 1/2*(x-1)^2               + 1/4*(x-1)^4 +  1/12*(x-1)^5,
-   22/40                 - 1/2*(x+0)^2               + 1/4*(x-0)^4 -  1/12*(x-0)^5,
-   17/40   +   5/8*(x+1) - 7/4*(x+1)^2 + 5/4*(x+1)^3 - 3/8*(x+1)^4 +  1/24*(x+1)^5,
-   243/120 - 81/24*(x+2) + 9/4*(x+2)^2 - 3/4*(x+2)^3 + 1/8*(x+2)^4 - 1/120*(x+2)^5)
+  @cse begin
+  a = 243/120 + 81/24*(x-3) + 9/4*(x-3)^2 + 3/4*(x-3)^3 + 1/8*(x-3)^4 + 1/120*(x-3)^5
+  b = 17/40   -   5/8*(x-2) - 7/4*(x-2)^2 - 5/4*(x-2)^3 - 3/8*(x-2)^4 -  1/24*(x-2)^5
+  c = 22/40                 - 1/2*(x-1)^2               + 1/4*(x-1)^4 +  1/12*(x-1)^5
+  d = 22/40                 - 1/2*(x+0)^2               + 1/4*(x-0)^4 -  1/12*(x-0)^5
+  e = 17/40   +   5/8*(x+1) - 7/4*(x+1)^2 + 5/4*(x+1)^3 - 3/8*(x+1)^4 +  1/24*(x+1)^5
+  f = 243/120 - 81/24*(x+2) + 9/4*(x+2)^2 - 3/4*(x+2)^3 + 1/8*(x+2)^4 - 1/120*(x+2)^5
+  end
+  return (a, b, c, d, e, f)
 end
 
 @inline indices(::BSplineWeighting{N}, i) where N = (i-fld(N, 2)):(i+cld(N, 2))
@@ -699,8 +728,8 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to
       end
       @timeit to "Field averaging" begin
         function average!(lhs, rhs)
-          a = 1:d.ngskip:size(lhs, 1)
-          b = 1:d.ngskip:size(lhs, 2)
+          a = 1:d.ngskip:size(rhs, 1)
+          b = 1:d.ngskip:size(rhs, 2)
           for (jl, jr) in enumerate(b), (il, ir) in enumerate(a)
             lhs[il, jl, ti] += real(rhs[ir, jr]) / d.ntskip
           end
@@ -764,7 +793,7 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT)
   plot!(ts, d.fieldenergy + d.kineticenergy, label="Total")
   savefig("Energies.png")
   
-  wind = findlast(ws .< max(10, 6 * sqrt(n0)/w0));
+  wind = findlast(ws .< max(100, 6 * sqrt(n0)/w0));
   isnothing(wind) && (wind = length(ws)÷2)
   kxind = min(length(kxs)÷2-1, 128)
   kyind = min(length(kys)÷2-1, 128)
