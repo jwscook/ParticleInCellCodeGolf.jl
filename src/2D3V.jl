@@ -18,7 +18,7 @@ function pic()
     Lx = 1.0
     Ly = Lx * NY / NX
     P = NX * NY * 2^3
-    NT = 2^10
+    NT = 2^12
     dl = min(Lx / NX, Ly / NY)
     n0 = 4 * pi^2
     debyeoverresolution = 1
@@ -29,11 +29,11 @@ function pic()
     #dt = dl/6vth
     #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
-    ntskip = 1#prevpow(2, round(Int, 10 / 6vth)) ÷ 4
-    dt = dl/4 #/6vth
+    ntskip = 4#prevpow(2, round(Int, 10 / 6vth)) ÷ 4
+    dt = dl/2 #/6vth
     field = PIC2D3V.LorenzGaugeField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-      imex=PIC2D3V.Explicit())
-    diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 4; makegifs=false)
+      imex=PIC2D3V.Implicit())
+    diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 2; makegifs=false)
     #shape = PIC2D3V.BSplineWeighting{@stat 5}()#PIC2D3V.NGPWeighting();#
     shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vth, n0, shape;
@@ -61,5 +61,5 @@ end
 using StatProfilerHTML
 diagnostics, field, plasma, n0, vcharacteristic, NT = pic()
 
-PIC2D3V.plotfields(diagnostics, field, n0, vcharacteristic, NT)
+PIC2D3V.plotfields(diagnostics, field, n0, vcharacteristic, NT; cutoff=20)
 
