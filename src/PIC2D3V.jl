@@ -5,17 +5,25 @@ using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, MuladdMacro, CommonSubexpressions
 using TimerOutputs, StaticNumbers, OffsetArrays
 
+const useoldmethod = false
+
 unimod(x, n) = x > n ? x - n : x > 0 ? x : x + n
 
-function applyperiodicity!(a, oa::OffsetArray)
+function applyperiodicity!(a::Array, oa)
+  NX, NY = size(a)
+  @assert length(size(a)) == 2
+  @assert length(size(oa)) == 2
   for j in axes(oa, 2), i in axes(oa, 1)
-    a[unimod(i, NX), unimod(j, NY)] .+= oa[i, j]
+    a[unimod(i, NX), unimod(j, NY)] += oa[i, j]
   end
 end
 
-function applyperiodicity!(oa::OffsetArray, a)
-  for j in axes(OA, 2), i in axes(OA, 1)
-     oa[i, j] = a[unimod(i, NX), unimod(j, NY)]
+function applyperiodicity!(oa, a::Array)
+  NX, NY = size(a)
+  @assert length(size(a)) == 2
+  @assert length(size(oa)) == 2
+  for j in axes(oa, 2), i in axes(oa, 1)
+     oa[i, j] += real(a[unimod(i, NX), unimod(j, NY)])
   end
 end
 
@@ -28,7 +36,6 @@ function halton(i, base, seed=0.0)
   end
   return mod(result + seed, 1)
 end
-
 
 struct ElectrostaticBoris
   t::SVector{3, Float64}
@@ -156,13 +163,12 @@ momentum(s::Species) = sum(velocities(s), dims=2)[:] * s.mass * s.weight
 
 calculateweight(n0, P) = n0 / P;
 
-function Species(P, vth, density, shape::AbstractShape; Lx, Ly,
-    charge=1, mass=1)
-  x  = Lx * halton.(0:P-1, 2, 1/sqrt(2));#rand(P);
-  y  = Ly * halton.(0:P-1, 3, 1/sqrt(2));#rand(P);
-  vx = vth * erfinv.(2halton.(0:P-1,  5, 1/sqrt(2)) .- 1);#rand(P));erfinv.(2rand(P) .- 1) * vth;#
-  vy = vth * erfinv.(2halton.(0:P-1,  7, 1/sqrt(2)) .- 1);#rand(P));erfinv.(2rand(P) .- 1) * vth;#
-  vz = vth * erfinv.(2halton.(0:P-1, 11, 1/sqrt(2)) .- 1);#rand(P))erfinv.(2rand(P) .- 1) * vth;#;
+function Species(P, vth, density, shape::AbstractShape; Lx, Ly, charge=1, mass=1)
+  x  = Lx * rand(P);#halton.(0:P-1, 2, 1/sqrt(2));#
+  y  = Ly * rand(P);#halton.(0:P-1, 3, 1/sqrt(2));#
+  vx = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  5, 1/sqrt(2)) .- 1);#rand(P));
+  vy = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  7, 1/sqrt(2)) .- 1);#rand(P));
+  vz = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1, 11, 1/sqrt(2)) .- 1);#rand(P));;
   vx .-= mean(vx)
   vy .-= mean(vy)
   vz .-= mean(vz)
@@ -231,20 +237,24 @@ end
 
 
 struct ElectrostaticField{T} <: AbstractField
-  ρs::Array{Float64, 3} # offset array
+#  ρs::Array{Float64, 3}
+  ρs::OffsetArray{Float64, 3, Array{Float64, 3}}# Array{Float64, 3} # offset array
   ϕ::Array{ComplexF64, 2}
   Ex::Array{ComplexF64, 2}
   Ey::Array{ComplexF64, 2}
-  Exy::Array{Float64, 3} # offset array
+#  Exy::Array{Float64, 3}
+  Exy::OffsetArray{Float64, 3, Array{Float64, 3}}#Array{Float64, 3} # offset array
   B0::NTuple{3, Float64}
   gridparams::GridParameters
   ffthelper::T
   boris::ElectrostaticBoris
 end
 
-function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0)
-  ρs=zeros(NX, NY, nthreads())
-  Exy=zeros(2, NX, NY);
+function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0, buffer=3)
+  ρs = OffsetArray(zeros(NX+2buffer, NY+2buffer, nthreads()), -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
+  Exy = OffsetArray(zeros(2, NX+2buffer, NY+2buffer), 1:2, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer);
+#  ρs=zeros(NX, NY, nthreads())
+#  Exy=zeros(2, NX, NY);
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   gps = GridParameters(Lx, Ly, NX, NY)
   boris = ElectrostaticBoris([B0x, B0y, B0z], dt)
@@ -254,8 +264,10 @@ end
 
 function update!(f::ElectrostaticField)
   # expand offset arrays, applyperiodicity!(oa, a)
-  @. f.Exy[1, :, :] = real(f.Ex)
-  @. f.Exy[2, :, :] = real(f.Ey)
+  applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
+  applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
+  #@. f.Exy[1, :, :] = real(f.Ex)
+  #@. f.Exy[2, :, :] = real(f.Ey)
 end
 
 abstract type AbstractImEx end
@@ -268,7 +280,8 @@ end
 
 struct LorenzGaugeField{T, U} <: AbstractField
   imex::T
-  ρJs::Array{Float64, 4} # would need to be offset array
+#  ρJs::Array{Float64, 4} # would need to be offset array
+  ρJs::OffsetArray{Float64, 4, Array{Float64, 4}} # would need to be offset array
   ϕ::Array{ComplexF64, 2}
   ϕ⁻::Array{ComplexF64, 2}
   Ax::Array{ComplexF64, 2}
@@ -287,7 +300,8 @@ struct LorenzGaugeField{T, U} <: AbstractField
   Bx::Array{ComplexF64, 2}
   By::Array{ComplexF64, 2}
   Bz::Array{ComplexF64, 2}
-  EBxyz::Array{Float64, 3} # would need to be offset array
+#  EBxyz::Array{Float64, 3} # would need to be offset array
+  EBxyz::OffsetArray{Float64, 3, Array{Float64, 3}}# would need to be offset array
   B0::NTuple{3, Float64}
   gridparams::GridParameters
   ffthelper::U
@@ -296,13 +310,15 @@ struct LorenzGaugeField{T, U} <: AbstractField
 end
 
 function LorenzGaugeField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
-    imex::AbstractImEx=Explicit())
-  EBxyz=zeros(6, NX, NY);
+    imex::AbstractImEx=Explicit(), buffer=0)
+#  EBxyz=zeros(6, NX, NY);
+  EBxyz = OffsetArray(zeros(6, NX+2buffer, NY+2buffer), 1:6, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer);
   gps = GridParameters(Lx, Ly, NX, NY)
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   boris = ElectromagneticBoris(dt)
-  return LorenzGaugeField(imex, zeros(4, NX, NY, nthreads()),
-    (zeros(ComplexF64, NX, NY) for _ in 1:18)..., EBxyz,
+  ρJs = OffsetArray(zeros(4, NX+2buffer, NY+2buffer, nthreads()), 1:4, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
+#  ρJs = zeros(4, NX, NY, nthreads())
+  return LorenzGaugeField(imex, ρJs, (zeros(ComplexF64, NX, NY) for _ in 1:18)..., EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris, dt)
 end
 
@@ -312,12 +328,26 @@ theta(::Implicit) = 1
 
 function update!(f::LorenzGaugeField)
   # expand offset arrays, applyperiodicity!(oa, a)
-  f.EBxyz[1, :, :] .= real.(f.Ex)
-  f.EBxyz[2, :, :] .= real.(f.Ey)
-  f.EBxyz[3, :, :] .= real.(f.Ez)
-  f.EBxyz[4, :, :] .= real.(f.Bx) .+ f.B0[1]
-  f.EBxyz[5, :, :] .= real.(f.By) .+ f.B0[2]
-  f.EBxyz[6, :, :] .= real.(f.Bz) .+ f.B0[3]
+  if useoldmethod
+    f.EBxyz[1, :, :] .= real.(f.Ex)
+    f.EBxyz[2, :, :] .= real.(f.Ey)
+    f.EBxyz[3, :, :] .= real.(f.Ez)
+    f.EBxyz[4, :, :] .= real.(f.Bx) .+ f.B0[1]
+    f.EBxyz[5, :, :] .= real.(f.By) .+ f.B0[2]
+    f.EBxyz[6, :, :] .= real.(f.Bz) .+ f.B0[3]
+  else
+    f.EBxyz .= 0.0
+    applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+    applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+    applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+    applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+    applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+    applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+    @views for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
+      f.EBxyz[i+3, j, k] += f.B0[i]
+    end
+  end
+  #println(f.EBxyz[1:6, 1, 1], " ", f.EBxyz[1:6, end, end], " ", f.EBxyz[1:6, 10, 10])
 end
 
 function reduction!(a, z)
@@ -326,6 +356,10 @@ function reduction!(a, z)
     a[i, j] += z[i, j, k]
     z[i, j, k] = 0.0
   end
+  #@views for k in axes(z, 3)
+  #  applyperiodicity!(a, z[:, :, k])
+  #end
+  #z .= 0
 end
 
 function reduction!(a, b, c, d, z)
@@ -334,15 +368,36 @@ function reduction!(a, b, c, d, z)
   @. b = 0.0
   @. c = 0.0
   @. d = 0.0
-  for k in axes(z, 4), j in axes(a, 2), i in axes(a, 1)
-    a[i, j] += z[1, i, j, k]
-    b[i, j] += z[2, i, j, k]
-    c[i, j] += z[3, i, j, k]
-    d[i, j] += z[4, i, j, k]
-    for h in axes(z, 1)
-      z[h, i, j, k] = 0.0
+
+  if useoldmethod
+    for k in axes(z, 4), j in axes(a, 2), i in axes(a, 1)
+      a[i, j] += z[1, i, j, k]
+      b[i, j] += z[2, i, j, k]
+      c[i, j] += z[3, i, j, k]
+      d[i, j] += z[4, i, j, k]
+      for h in axes(z, 1)
+        z[h, i, j, k] = 0.0
+      end
     end
+  else
+    @views for k in axes(z, 4)
+      applyperiodicity!(a, z[1, :, :, k])
+    end
+    @views for k in axes(z, 4)
+      applyperiodicity!(b, z[2, :, :, k])
+    end
+    @views for k in axes(z, 4)
+      applyperiodicity!(c, z[3, :, :, k])
+    end
+    @views for k in axes(z, 4)
+      applyperiodicity!(d, z[4, :, :, k])
+    end
+    z .= 0
   end
+  #println(a[1, 1], " ", a[end÷2, end÷2],  " ",a[end, end])
+  #println(b[1, 1], " ", b[end÷2, end÷2],  " ",b[end, end])
+  #println(c[1, 1], " ", c[end÷2, end÷2],  " ",c[end, end])
+  #println(d[1, 1], " ", d[end÷2, end÷2],  " ",d[end, end])
 end
 
 # E = -∇ ϕ
@@ -467,8 +522,10 @@ function loop!(plasma, field::LorenzGaugeField, to, t)
           y[i] = unimod(y[i] + (vyi + vy[i]) / 2 * dt, Ly)
           # now deposit at (n+1)th timestep
           deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
-                   qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+                     qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
         end
+        #@show maximum(abs, vx) * dt * NX_Lx
+        #@show maximum(abs, vy) * NY_Ly * dt
       end
     end
   end
@@ -555,7 +612,11 @@ end
     NZ_Lz::Float64)
   zNZ = z * NZ_Lz # floating point position in units of cells
   # no need for unimod with offset arrays
-  i = unimod(ceil(Int, zNZ), NZ) # cell number
+i = if useoldmethod
+  unimod(ceil(Int, zNZ), NZ) # cell number
+else
+  ceil(Int, zNZ) # cell number
+end
   r = i - zNZ; # distance into cell i in units of cell width
   @assert 0 < r <= 1 "$z, $NZ, $NZ_Lz, $i"
   return gridinteractiontuple(s, i, r, NZ)
@@ -563,7 +624,13 @@ end
 
 @inline gridinteractiontuple(::NGPWeighting, i, r, NZ) = ((i, 1), )
 # no need for unimod with offset arrays
-@inline gridinteractiontuple(::AreaWeighting, i, r, NZ) = ((i, 1-r), (unimod(i+1, NZ), r))
+@inline function gridinteractiontuple(::AreaWeighting, i, r, NZ)
+  if useoldmethod
+    return ((i, 1-r), (unimod(i+1, NZ), r))
+  else
+    return ((i, 1-r), (i+1, r))
+  end
+end
 
 bspline(::BSplineWeighting{@stat N}, x) where N = bspline(BSplineWeighting{Int(N)}(), x)
 
@@ -621,12 +688,16 @@ end
   inds = indices(s, j)
   fractions = bspline(s, z)
   #@assert sum(fractions) ≈ 1 "$(sum(fractions)), $fractions"
+if useoldmethod
   if (inds[1] < 1) || (inds[end] > NZ)
     # no need for unimod with offset arrays
     return zip(unimod.(inds, NZ), fractions)
   else
     return zip(inds, fractions)
   end
+else
+  return zip(inds, fractions)
+end
 end
 
 # NG = 64
@@ -866,64 +937,37 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
       nsy = ceil(Int, size(F,2) / 128)
       anim = @animate for i in axes(F, 3)
         heatmap(xs[1:nsx:end], ys[1:nsy:end], F[1:nsx:end, 1:nsy:end, i] ./ maxabsF)
-        #heatmap(F[1:nsx:end, 1:nsy:end, i] ./ maxabsF)
         xlabel!(L"Position x $[v_{th} / \Omega]$");
         ylabel!(L"Position y $[v_{th} / \Omega]$")
       end
       gif(anim, "PIC2D3V_$(FS)_XY.gif", fps=10)
     end
 
-    heatmap(xs, ys, F[:, :, 1])
-    #heatmap(F[:, :, 1])
-    xlabel!(L"Position x $[v_{th} / \Omega]$");
-    ylabel!(L"Position y $[v_{th} / \Omega]$")
-    savefig("PIC2D3V_$(FS)_XY_ic.png")
-
-    heatmap(xs, ys, F[:, :, end])
-    #heatmap(F[:, :, end])
-    xlabel!(L"Position x $[v_{th} / \Omega]$");
-    ylabel!(L"Position y $[v_{th} / \Omega]$")
-    savefig("PIC2D3V_$(FS)_XY_final.png")
-
-#    Z = log10.(abs.(fft(F[:, 1, :] .* filter)[2:kxind, 1:wind]))'
-#    heatmap(kxs[2:kxind], ws[1:wind], Z)
-#    xlabel!(L"Wavenumber x $[\Omega_c / v_{th}]$");
-#    ylabel!(L"Frequency $[\Omega_c]$")
-#    savefig("PIC2D3V_$(FS)_WKy1_c.png")
-#    xlabel!(L"Wavenumber x $[\Pi / v_{th}]$");
-#    ylabel!(L"Frequency $[\Pi]$")
-#    heatmap(kxs[2:kxind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
-#    savefig("PIC2D3V_$(FS)_WKy1_p.png")
+#    heatmap(xs, ys, F[:, :, 1])
+#    xlabel!(L"Position x $[v_{th} / \Omega]$");
+#    ylabel!(L"Position y $[v_{th} / \Omega]$")
+#    savefig("PIC2D3V_$(FS)_XY_ic.png")
 #
-#    Z = log10.(abs.(fft(F[1, :, :] .* filter)[2:kyind, 1:wind]))'
-#    heatmap(kys[2:kyind], ws[1:wind], Z)
-#    xlabel!(L"Wavenumber y $[\Omega_c / v_{th}]$");
-#    ylabel!(L"Frequency $[\Omega_c]$")
-#    savefig("PIC2D3V_$(FS)_WKx1_c.png")
-#    heatmap(kys[2:kyind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
-#    xlabel!(L"Wavenumber y $[\Pi / v_{th}]$");
-#    ylabel!(L"Frequency $[\Pi]$")
-#    savefig("PIC2D3V_$(FS)_WKx1_p.png")
+#    heatmap(xs, ys, F[:, :, end])
+#    xlabel!(L"Position x $[v_{th} / \Omega]$");
+#    ylabel!(L"Position y $[v_{th} / \Omega]$")
+#    savefig("PIC2D3V_$(FS)_XY_final.png")
 
-    Z = log10.(sum(i->abs.(fft(F[:, i, :] .* filter)[2:kxind, 1:wind]), 1:size(F, 2)))'
+    Z = log10.(abs.(fft(F)[2:kxind, 1, 1:wind]))'
     heatmap(kxs[2:kxind], ws[1:wind], Z)
-    #heatmap(Z)
     xlabel!(L"Wavenumber x $[\Omega_c / v_{th}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumy_c.png")
     xlabel!(L"Wavenumber x $[\Pi / v_{th}]$");
     ylabel!(L"Frequency $[\Pi]$")
     heatmap(kxs[2:kxind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
-    #heatmap(Z)
     savefig("PIC2D3V_$(FS)_WKsumy_p.png")
    
-    Z = log10.(sum(i->abs.(fft(F[i, :, :] .* filter)[2:kyind, 1:wind]), 1:size(F, 1)))'
-    #heatmap(Z)
+    Z = log10.(abs.(fft(F)[1, 2:kyind, 1:wind]))'
     heatmap(kys[2:kyind], ws[1:wind], Z)
     xlabel!(L"Wavenumber y $[\Omega_c / v_{th}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumx_c.png")
-    #heatmap(Z)
     heatmap(kys[2:kyind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
     xlabel!(L"Wavenumber y $[\Pi / v_{th}]$");
     ylabel!(L"Frequency $[\Pi]$")
