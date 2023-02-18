@@ -468,17 +468,6 @@ function loop!(plasma, field::LorenzGaugeField, to, t)
     field.Jx[1, 1] = 0
     field.Jy[1, 1] = 0
     field.Jz[1, 1] = 0
-    #if t == 0
-    #  field.ϕ⁻ .= 0.0
-    #  field.ϕ .= 0.0
-    #  field.ϕ⁻[end÷2, end÷2] = 1.0
-    #  #field.ϕ[end÷2, end÷2] = 1.0
-    #  #field.ffthelper.pfft! * field.ϕ⁻
-    #  #field.ffthelper.pfft! * field.ϕ
-    #  #field.ϕ⁻[1, 1] *= 0.0
-    #  #field.ϕ⁻[10, 10] = 1.0
-    #  #field.ϕ[10, 10] = 1.0
-    #end
     # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
     lorenzgauge!(field.imex, field.ϕ, field.ϕ⁻, field.ρ, field.ffthelper.k², dt^2)
     lorenzgauge!(field.imex, field.Ax, field.Ax⁻, field.Jx, field.ffthelper.k², dt^2)
