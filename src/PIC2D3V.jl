@@ -330,10 +330,7 @@ function LorenzGaugeField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
 end
 struct LorenzGaugeStaggeredField{T, U} <: AbstractLorenzGaugeField
   imex::T
-  ρJs⁻::OffsetArray{Float64, 4, Array{Float64, 4}}
-  ρJs⁰::OffsetArray{Float64, 4, Array{Float64, 4}}
   ρJs⁺::OffsetArray{Float64, 4, Array{Float64, 4}}
-  ρJsᵗ::OffsetArray{Float64, 4, Array{Float64, 4}}
   ϕ⁺::Array{ComplexF64, 2}
   ϕ⁰::Array{ComplexF64, 2}
   ϕ⁻::Array{ComplexF64, 2}
@@ -380,8 +377,8 @@ function LorenzGaugeStaggeredField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=
   boris = ElectromagneticBoris(dt)
   ρJs = OffsetArray(zeros(4, NX+2buffer, NY+2buffer, nthreads()),
     1:4, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
-  return LorenzGaugeStaggeredField(imex, ρJs, deepcopy(ρJs), deepcopy(ρJs),
-    deepcopy(ρJs), (zeros(ComplexF64, NX, NY) for _ in 1:30)..., EBxyz,
+  return LorenzGaugeStaggeredField(imex, ρJs,
+    (zeros(ComplexF64, NX, NY) for _ in 1:30)..., EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris, dt)
 end
 
@@ -583,6 +580,16 @@ function lorenzgauge!(imex::AbstractImEx, xⁿ, xⁿ⁻¹, sⁿ, k², dt²)
     xⁿ[i] = xⁿ⁺¹
   end
 end
+
+function lorenzgauge!(imex::AbstractImEx, xⁿ⁺¹, xⁿ, xⁿ⁻¹, sⁿ, k², dt²)
+  θ = theta(imex)
+  @threads for i in eachindex(xⁿ)
+    num = numerator(imex, dt², k²[i])
+    den = denominator(imex, dt², k²[i])
+    xⁿ⁺¹[i] = (num * xⁿ[i] + dt² * sⁿ[i]) / den - xⁿ⁻¹[i]
+  end
+end
+
 function lorenzgauge!(imex::AbstractImEx, xⁿ⁺¹, xⁿ, xⁿ⁻¹, sⁿ⁺¹, sⁿ, sⁿ⁻¹, k², dt²)
   θ = theta(imex)
   @threads for i in eachindex(xⁿ)
@@ -712,60 +719,52 @@ function loop!(plasma, field::LorenzGaugeField, to, t, _)
 end
 
 warmup!(field::AbstractField, plasma, to) = field
+function warmup!(ρ, Jx, Jy, Jz, ρJs, plasma, gridparams, dt, to)
+  Lx, Ly = gridparams.Lx, gridparams.Ly
+  NX_Lx, NY_Ly = gridparams.NX_Lx, gridparams.NY_Ly
+  ΔV = cellvolume(gridparams)
+  ρJs .= 0
+  @timeit to "Particle Loop" begin
+    @threads for j in axes(ρJs, 4)
+      ρJ = @view ρJs[:, :, :, j]
+      for species in plasma
+        qw_ΔV = species.charge * species.weight / ΔV
+        x = @view positions(species)[1, :]
+        y = @view positions(species)[2, :]
+        vx = @view velocities(species)[1, :]
+        vy = @view velocities(species)[2, :]
+        vz = @view velocities(species)[3, :]
+        for i in species.chunks[j]
+          x[i] = unimod(x[i] + vx[i] * dt, Lx)
+          y[i] = unimod(y[i] + vy[i] * dt, Ly)
+          deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+            qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+          x[i] = unimod(x[i] - vx[i] * dt, Lx)
+          y[i] = unimod(y[i] - vy[i] * dt, Ly)
+        end
+      end
+    end
+  end
+  @timeit to "Field Reduction" begin
+    reduction!(ρ, Jx, Jy, Jz, ρJs)
+  end
+end
 
 function warmup!(field::LorenzGaugeStaggeredField, plasma, to)
   @timeit to "Warmup" begin
     dt = timestep(field)
-    Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
-    NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
-    ΔV = cellvolume(field.gridparams)
-    field.ρJs⁻ .= 0
-    field.ρJs⁰ .= 0
-    field.ρJs⁺ .= 0
-    @timeit to "Particle Loop" begin
-      @threads for j in axes(field.ρJs⁺, 4)
-        ρJ⁻ = @view field.ρJs⁻[:, :, :, j]
-        ρJ⁰ = @view field.ρJs⁰[:, :, :, j]
-        ρJ⁺ = @view field.ρJs⁺[:, :, :, j]
-        for species in plasma
-          qw_ΔV = species.charge * species.weight / ΔV
-          x = @view positions(species)[1, :]
-          y = @view positions(species)[2, :]
-          vx = @view velocities(species)[1, :]
-          vy = @view velocities(species)[2, :]
-          vz = @view velocities(species)[3, :]
-          #  E.....E.....E
-          #  B.....B.....B
-          #  ϕ.....ϕ.....ϕ
-          #  -..A..0..A..+..A
-          #  ρ.....ρ.....ρ
-          #  -..J..0..J..+..J
-          #  x.....x.....+
-          #  -..v..0..v..+..v
-          for i in species.chunks[j]
-            x[i] = unimod(x[i] - vx[i] * dt, Lx)
-            y[i] = unimod(y[i] - vy[i] * dt, Ly)
-            deposit!(ρJ⁻, species.shape, x[i], y[i], NX_Lx, NY_Ly,
-              qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
-            x[i] = unimod(x[i] + vx[i] * dt, Lx)
-            y[i] = unimod(y[i] + vy[i] * dt, Ly)
-            deposit!(ρJ⁰, species.shape, x[i], y[i], NX_Lx, NY_Ly,
-              qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
-            x[i] = unimod(x[i] + vx[i] * dt, Lx)
-            y[i] = unimod(y[i] + vy[i] * dt, Ly)
-            deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly,
-              qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
-            x[i] = unimod(x[i] - vx[i] * dt, Lx)
-            y[i] = unimod(y[i] - vy[i] * dt, Ly)
-          end
-        end
-      end
-    end
-    @timeit to "Field Reduction" begin
-      reduction!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁻)
-      reduction!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁰)
-      reduction!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺)
-    end
+    warmup!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁺, plasma, field.gridparams, -dt, to)
+    warmup!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁺, plasma, field.gridparams, 0, to)
+    warmup!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺, plasma, field.gridparams, dt, to)
+  end
+end
+
+function warmup!(field::LorenzGaugeSemiImplicitField, plasma, to)
+  @timeit to "Warmup" begin
+    dt = timestep(field)
+    warmup!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁻, plasma, field.gridparams, -dt, to)
+    warmup!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁰, plasma, field.gridparams, 0, to)
+    warmup!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺, plasma, field.gridparams, dt, to)
   end
 end
 
@@ -778,7 +777,7 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
 
   @timeit to "Particle Loop" begin
     @threads for j in axes(field.ρJs⁺, 4)
-      ρJ = @view field.ρJs⁺[:, :, :, j]
+      ρJ⁺ = @view field.ρJs⁺[:, :, :, j]
       for species in plasma
         qw_ΔV = species.charge * species.weight / ΔV
         q_m = species.charge / species.mass
@@ -802,12 +801,12 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
           x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
           y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
           # deposit J at the (n+1/2)th point
-          deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+          deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly,
             vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
           x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
           y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
           # now deposit ρ at (n+1)th timestep
-          deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
+          deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
         end
       end
     end
@@ -821,14 +820,14 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
     field.ffthelper.pfft! * field.Jx⁺;
     field.ffthelper.pfft! * field.Jy⁺;
     field.ffthelper.pfft! * field.Jz⁺;
-  end
-  @timeit to "Field Solve" begin
     field.ρ⁺[1, 1] = 0
     field.Jx⁺[1, 1] = 0
     field.Jy⁺[1, 1] = 0
     field.Jz⁺[1, 1] = 0
+  end
+  @timeit to "Field Solve" begin
     # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
-    lorenzgauge!(field.imex, field.ϕ⁺, field.ϕ⁰,  field.ϕ⁻, field.ρ⁺, field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.ϕ⁺,  field.ϕ⁰,  field.ϕ⁻,  field.ρ⁺,  field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2)
     lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁺, field.Jx⁰, field.Jx⁻, field.ffthelper.k², dt^2)
     lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁺, field.Jy⁰, field.Jy⁻, field.ffthelper.k², dt^2)
     lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁺, field.Jz⁰, field.Jz⁻, field.ffthelper.k², dt^2)
@@ -848,16 +847,25 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   #  x.....x.....x
   #  -..v..0..v..+..v
   @timeit to "Calculate E, B" begin
-    θ = theta(field.imex)
-    @. field.Ex = -im * field.ffthelper.kx * field.ϕ⁰
-    @. field.Ey = -im * field.ffthelper.ky * field.ϕ⁰
-    @. field.Ex -= (field.Ax⁰ - field.Ax⁻)/dt
-    @. field.Ey -= (field.Ay⁰ - field.Ay⁻)/dt
-    @. field.Ez = -(field.Az⁰ - field.Az⁻)/dt
-    @. field.Bx =  im * field.ffthelper.ky * (field.Az⁻ + field.Az⁰)/2
-    @. field.By = -im * field.ffthelper.kx * (field.Az⁻ + field.Az⁰)/2
-    @. field.Bz =  im * field.ffthelper.kx * (field.Ay⁻ + field.Ay⁰)/2
-    @. field.Bz -= im * field.ffthelper.ky * (field.Ax⁻ + field.Ax⁰)/2
+    #θ = theta(field.imex)
+    #@. field.Ex = -im * field.ffthelper.kx * field.ϕ⁰
+    #@. field.Ey = -im * field.ffthelper.ky * field.ϕ⁰
+    #@. field.Ex -= (field.Ax⁰ - field.Ax⁻)/dt
+    #@. field.Ey -= (field.Ay⁰ - field.Ay⁻)/dt
+    #@. field.Ez = -(field.Az⁰ - field.Az⁻)/dt
+    #@. field.Bx =  im * field.ffthelper.ky * (field.Az⁻ + field.Az⁰)/2
+    #@. field.By = -im * field.ffthelper.kx * (field.Az⁻ + field.Az⁰)/2
+    #@. field.Bz =  im * field.ffthelper.kx * (field.Ay⁻ + field.Ay⁰)/2
+    #@. field.Bz -= im * field.ffthelper.ky * (field.Ax⁻ + field.Ax⁰)/2
+    @. field.Ex = -im * field.ffthelper.kx * field.ϕ⁺
+    @. field.Ey = -im * field.ffthelper.ky * field.ϕ⁺
+    @. field.Ex -= (field.Ax⁺ - field.Ax⁰)/dt
+    @. field.Ey -= (field.Ay⁺ - field.Ay⁰)/dt
+    @. field.Ez = -(field.Az⁺ - field.Az⁰)/dt
+    @. field.Bx =  im * field.ffthelper.ky * (field.Az⁺ + field.Az⁰)/2
+    @. field.By = -im * field.ffthelper.kx * (field.Az⁺ + field.Az⁰)/2
+    @. field.Bz =  im * field.ffthelper.kx * (field.Ay⁺ + field.Ay⁰)/2
+    @. field.Bz -= im * field.ffthelper.ky * (field.Ax⁺ + field.Ax⁰)/2
   end
   @timeit to "Field Inverse FT" begin
     field.ffthelper.pifft! * field.Ex
@@ -869,8 +877,6 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   end
   @timeit to "Field Update" update!(field)
   @timeit to "Copy over buffers" begin
-    field.ρJs⁻ .= field.ρJs⁰
-    field.ρJs⁰ .= field.ρJs⁺
     field.ϕ⁻ .= field.ϕ⁰
     field.ϕ⁰ .= field.ϕ⁺
     field.Ax⁻ .= field.Ax⁰
@@ -891,27 +897,47 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
   copyto!.(plasmacopy, plasma)
   firstloop = true
   iters = 0
-  field.ρJsᵗ[1] = Inf
-  #while firstloop || (iters < field.maxiters)
-  while !isapprox(field.ρJsᵗ, field.ρJs⁺, rtol=field.rtol, atol=0)# && (iters < field.maxiters)
+  while true
+    if (iters > 0) && (iters > field.maxiters || isapprox(field.ρJsᵗ, field.ρJs⁺, rtol=field.rtol, atol=0))
+      for species in plasma
+        x = @view positions(species)[1, :]
+        y = @view positions(species)[2, :]
+        vx = @view velocities(species)[1, :]
+        vy = @view velocities(species)[2, :]
+        vz = @view velocities(species)[3, :]
+        xʷ = @view positions(species; work=true)[1, :]
+        yʷ = @view positions(species; work=true)[2, :]
+        vxʷ = @view velocities(species; work=true)[1, :]
+        vyʷ = @view velocities(species; work=true)[2, :]
+        vzʷ = @view velocities(species; work=true)[3, :]
+        x .= xʷ
+        y .= yʷ
+        vx .= vxʷ
+        vy .= vyʷ
+        vz .= vzʷ
+      end
+      break
+    end
     iters += 1
-    iters > field.maxiters && break
     copyto!.(plasma, plasmacopy)
-    field.ρJsᵗ .= field.ρJs⁺
-    field.ρJs⁺ .= 0
+    @turbo field.ρJsᵗ .= field.ρJs⁺
+    @turbo field.ρJs⁺ .= 0
     @timeit to "Particle Loop" begin
       @threads for j in axes(field.ρJs⁺, 4)
-        ρJ = @view field.ρJs⁺[:, :, :, j]
+        ρJ⁺ = @view field.ρJs⁺[:, :, :, j]
         for species in plasma
           qw_ΔV = species.charge * species.weight / ΔV
           q_m = species.charge / species.mass
           x = @view positions(species)[1, :]
           y = @view positions(species)[2, :]
-          vxʰ = @view velocities(species; work=true)[1, :]
-          vyʰ = @view velocities(species; work=true)[2, :]
           vx = @view velocities(species)[1, :]
           vy = @view velocities(species)[2, :]
           vz = @view velocities(species)[3, :]
+          xʷ = @view positions(species; work=true)[1, :]
+          yʷ = @view positions(species; work=true)[2, :]
+          vxʷ = @view velocities(species; work=true)[1, :]
+          vyʷ = @view velocities(species; work=true)[2, :]
+          vzʷ = @view velocities(species; work=true)[3, :]
           #  E.....E.....E
           #  B.....B.....B
           #  ϕ.....ϕ.....ϕ
@@ -922,17 +948,26 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
           #  -..v..0..v..+..v
           for i in species.chunks[j]
             Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
-            vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+            #vx0, vy0, vz0 = vx[i], vy[i], vz[i]
+            #vx⁻, vy⁻, vz⁻ = field.boris(vx0, vy0, vz0, Exi, Eyi, Ezi,
+            #  Bxi, Byi, Bzi, -q_m);
+            vx⁺, vy⁺, vz⁺ = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
               Bxi, Byi, Bzi, q_m);
-            x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
-            y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
-            # deposit J at the (n+1/2)th point
-            deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
-              vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
-            x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
-            y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
+            #x⁻ = unimod(x[i] - vx0 * dt, Lx)
+            #y⁻ = unimod(y[i] - vy0 * dt, Ly)
+            ## deposit J at the (n+1/2)th point
+            #deposit!(ρJ⁻, species.shape, x⁻, y⁻, NX_Lx, NY_Ly,
+            #  vx⁻ * qw_ΔV, vy⁻ * qw_ΔV, vz⁻ * qw_ΔV)
+            x⁺ = unimod(x[i] + vx[i] * dt, Lx)
+            y⁺ = unimod(y[i] + vy[i] * dt, Ly)
             # now deposit ρ at (n+1)th timestep
-            deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
+            deposit!(ρJ⁺, species.shape, x⁺, y⁺, NX_Lx, NY_Ly,
+              vx⁺ * qw_ΔV, vy⁺ * qw_ΔV, vz⁺ * qw_ΔV)
+            xʷ[i] = x⁺
+            yʷ[i] = y⁺
+            vxʷ[i] = vx⁺
+            vyʷ[i] = vy⁺
+            vzʷ[i] = vz⁺
           end
         end
       end
@@ -974,15 +1009,15 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
     #  -..v..0..v..+..v
     @timeit to "Calculate E, B" begin
       θ = theta(field.imex)
-      @. field.Ex = -im * field.ffthelper.kx * (0field.ϕ⁻ + field.ϕ⁰ + 0field.ϕ⁺)
-      @. field.Ey = -im * field.ffthelper.ky * (0field.ϕ⁻ + field.ϕ⁰ + 0field.ϕ⁺)
-      @. field.Ex -= (0field.Ax⁺ + field.Ax⁰ - field.Ax⁻)/dt
-      @. field.Ey -= (0field.Ay⁺ + field.Ay⁰ - field.Ay⁻)/dt
-      @. field.Ez = -(0field.Az⁺ + field.Az⁰ - field.Az⁻)/dt
-      @. field.Bx =  im * field.ffthelper.ky * (field.Az⁻/2 + field.Az⁰/2 + 0field.Az⁺)
-      @. field.By = -im * field.ffthelper.kx * (field.Az⁻/2 + field.Az⁰/2 + 0field.Az⁺)
-      @. field.Bz =  im * field.ffthelper.kx * (field.Ay⁻/2 + field.Ay⁰/2 + 0field.Ay⁺)
-      @. field.Bz -= im * field.ffthelper.ky * (field.Ax⁻/2 + field.Ax⁰/2 + 0field.Ax⁺)
+      @. field.Ex = -im * field.ffthelper.kx * (θ/2 * (field.ϕ⁺ + field.ϕ⁻) + (1-θ)*field.ϕ⁰) 
+      @. field.Ey = -im * field.ffthelper.ky * (θ/2 * (field.ϕ⁺ + field.ϕ⁻) + (1-θ)*field.ϕ⁰)
+      @. field.Ex -= (field.Ax⁺ - field.Ax⁻)/2dt
+      @. field.Ey -= (field.Ay⁺ - field.Ay⁻)/2dt
+      @. field.Ez = -(field.Az⁺ - field.Az⁻)/2dt
+      @. field.Bx =  im * field.ffthelper.ky * (θ/2 * (field.Az⁺ + field.Az⁻) + (1-θ)*field.Az⁰) 
+      @. field.By = -im * field.ffthelper.kx * (θ/2 * (field.Az⁺ + field.Az⁻) + (1-θ)*field.Az⁰) 
+      @. field.Bz =  im * field.ffthelper.kx * (θ/2 * (field.Ay⁺ + field.Ay⁻) + (1-θ)*field.Ay⁰) 
+      @. field.Bz -= im * field.ffthelper.ky * (θ/2 * (field.Ax⁺ + field.Ax⁻) + (1-θ)*field.Ax⁰) 
     end
     @timeit to "Field Inverse FT" begin
       field.ffthelper.pifft! * field.Ex
@@ -994,7 +1029,6 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
     end
     @timeit to "Field Update" update!(field)
   end
-  @show iters
   @timeit to "Copy over buffers" begin
     field.ρJs⁻ .= field.ρJs⁰
     field.ρJs⁰ .= field.ρJs⁺

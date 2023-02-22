@@ -12,13 +12,13 @@ function pic()
   to = TimerOutput()
 
   #@timeit to "Initialisation" begin
-    NQ = 4
+    NQ = 2 
     NX = 128 ÷ NQ
     NY = 128 * NQ
     Lx = 1.0
     Ly = Lx * NY / NX
     P = NX * NY * 2^3
-    NT = 2^13#2^14
+    NT = 2^14#2^14
     dl = min(Lx / NX, Ly / NY)
     n0 = 4 * pi^2
     debyeoverresolution = 1
@@ -31,17 +31,20 @@ function pic()
     #dt = dl/6vth
     #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
-    ntskip = 1#4#prevpow(2, round(Int, 10 / 6vth)) ÷ 4
+    ntskip = 4#4#prevpow(2, round(Int, 10 / 6vth)) ÷ 4
     dt = dl/3 #/6vth
     #dt = dl / vth
     @show (vth * dt) / dl
     #field = PIC2D3V.LorenzGaugeField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
     #  imex=PIC2D3V.ImEx(1), buffer=10)
     field = PIC2D3V.LorenzGaugeStaggeredField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-      imex=PIC2D3V.ImEx(1), buffer=10)#, rtol=sqrt(eps()), maxiters=1)
+      imex=PIC2D3V.ImEx(1), buffer=10)
+    #field = PIC2D3V.LorenzGaugeSemiImplicitField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
+    #  imex=PIC2D3V.ImEx(1), buffer=10, rtol=sqrt(eps()), maxiters=10)
     diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 2; makegifs=false)
-    #shape = PIC2D3V.BSplineWeighting{@stat 2}()#PIC2D3V.NGPWeighting();#
-    shape = PIC2D3V.AreaWeighting();#
+    shape = PIC2D3V.BSplineWeighting{@stat 3}()
+    #shape = PIC2D3V.NGPWeighting();#
+    #shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vth, n0, shape;
       Lx=Lx, Ly=Ly, charge=-1, mass=1)
     ions = PIC2D3V.Species(P, vth / sqrt(16), n0, shape;
