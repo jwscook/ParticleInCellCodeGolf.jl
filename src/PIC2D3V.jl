@@ -5,8 +5,6 @@ using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, MuladdMacro, CommonSubexpressions
 using TimerOutputs, StaticNumbers, OffsetArrays
 
-const useoldmethod = false
-
 unimod(x, n) = x > n ? x - n : x > 0 ? x : x + n
 
 function applyperiodicity!(a::Array, oa)
@@ -152,10 +150,26 @@ struct Species{S<:AbstractShape}
   xyv::Matrix{Float64}
   p::Vector{Int}
   chunks::Vector{UnitRange{Int}}
+  xyvwork::Matrix{Float64}
 end
-positions(s::Species) = (@view s.xyv[1:2, :])
-velocities(s::Species) = (@view s.xyv[3:5, :])
+function positions(s::Species; work=false)
+  return work ? (@view s.xyvwork[1:2, :]) : (@view s.xyv[1:2, :])
+end
+function velocities(s::Species; work=false)
+  return work ? (@view s.xyvwork[3:5, :]) : (@view s.xyv[3:5, :])
+end
 xyvchunk(s::Species, i::Int) = @view s.xyv[:, s.chunks[i]]
+
+function copyto!(s::Species)
+  @tturbo s.xyvwork .= src.xyv
+  return s
+end
+
+function copyto!(dest::Species, src::Species)
+  @tturbo dest.xyv .= src.xyv
+  @tturbo dest.p .= src.p
+  return dest
+end
 
 kineticenergy(s::Species) = sum(abs2, velocities(s)) * s.mass / 2 * s.weight
 
@@ -179,7 +193,7 @@ function Species(P, vth, density, shape::AbstractShape; Lx, Ly, charge=1, mass=1
   xyv = Matrix(hcat(x, y, vx, vy, vz)')
   chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
   weight = calculateweight(density, P)
-  return Species(Float64(charge), Float64(mass), weight, shape, xyv, p, chunks)
+  return Species(Float64(charge), Float64(mass), weight, shape, xyv, p, chunks, deepcopy(xyv))
 end
 
 function Base.sort!(s::Species, Δx, Δy)
@@ -191,6 +205,7 @@ end
 
 
 abstract type AbstractField end
+abstract type AbstractLorenzGaugeField <: AbstractField end
 timestep(f::AbstractField) = f.boris.dt_2 * 2
 
 struct GridParameters
@@ -253,8 +268,6 @@ end
 function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0, buffer=3)
   ρs = OffsetArray(zeros(NX+2buffer, NY+2buffer, nthreads()), -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
   Exy = OffsetArray(zeros(2, NX+2buffer, NY+2buffer), 1:2, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer);
-#  ρs=zeros(NX, NY, nthreads())
-#  Exy=zeros(2, NX, NY);
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   gps = GridParameters(Lx, Ly, NX, NY)
   boris = ElectrostaticBoris([B0x, B0y, B0z], dt)
@@ -263,11 +276,8 @@ function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0, buff
 end
 
 function update!(f::ElectrostaticField)
-  # expand offset arrays, applyperiodicity!(oa, a)
   applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
   applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
-  #@. f.Exy[1, :, :] = real(f.Ex)
-  #@. f.Exy[2, :, :] = real(f.Ey)
 end
 
 abstract type AbstractImEx end
@@ -278,29 +288,27 @@ struct ImEx <: AbstractImEx
 end
 
 
-struct LorenzGaugeField{T, U} <: AbstractField
+struct LorenzGaugeField{T, U} <: AbstractLorenzGaugeField
   imex::T
-#  ρJs::Array{Float64, 4} # would need to be offset array
   ρJs::OffsetArray{Float64, 4, Array{Float64, 4}} # would need to be offset array
-  ϕ::Array{ComplexF64, 2}
-  ϕ⁻::Array{ComplexF64, 2}
-  Ax::Array{ComplexF64, 2}
-  Ay::Array{ComplexF64, 2}
-  Az::Array{ComplexF64, 2}
-  Ax⁻::Array{ComplexF64, 2}
-  Ay⁻::Array{ComplexF64, 2}
-  Az⁻::Array{ComplexF64, 2}
+  ϕ⁺::Array{ComplexF64, 2}
+  ϕ⁰::Array{ComplexF64, 2}
+  Ax⁺::Array{ComplexF64, 2}
+  Ay⁺::Array{ComplexF64, 2}
+  Az⁺::Array{ComplexF64, 2}
+  Ax⁰::Array{ComplexF64, 2}
+  Ay⁰::Array{ComplexF64, 2}
+  Az⁰::Array{ComplexF64, 2}
   Ex::Array{ComplexF64, 2}
   Ey::Array{ComplexF64, 2}
   Ez::Array{ComplexF64, 2}
-  ρ::Array{ComplexF64, 2}
-  Jx::Array{ComplexF64, 2}
-  Jy::Array{ComplexF64, 2}
-  Jz::Array{ComplexF64, 2}
+  ρ⁺::Array{ComplexF64, 2}
+  Jx⁺::Array{ComplexF64, 2}
+  Jy⁺::Array{ComplexF64, 2}
+  Jz⁺::Array{ComplexF64, 2}
   Bx::Array{ComplexF64, 2}
   By::Array{ComplexF64, 2}
   Bz::Array{ComplexF64, 2}
-#  EBxyz::Array{Float64, 3} # would need to be offset array
   EBxyz::OffsetArray{Float64, 3, Array{Float64, 3}}# would need to be offset array
   B0::NTuple{3, Float64}
   gridparams::GridParameters
@@ -311,55 +319,171 @@ end
 
 function LorenzGaugeField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
     imex::AbstractImEx=Explicit(), buffer=0)
-#  EBxyz=zeros(6, NX, NY);
   EBxyz = OffsetArray(zeros(6, NX+2buffer, NY+2buffer), 1:6, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer);
   gps = GridParameters(Lx, Ly, NX, NY)
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   boris = ElectromagneticBoris(dt)
-  ρJs = OffsetArray(zeros(4, NX+2buffer, NY+2buffer, nthreads()), 1:4, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
-#  ρJs = zeros(4, NX, NY, nthreads())
-  return LorenzGaugeField(imex, ρJs, (zeros(ComplexF64, NX, NY) for _ in 1:18)..., EBxyz,
+  ρJs = OffsetArray(zeros(4, NX+2buffer, NY+2buffer, nthreads()),
+    1:4, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
+  return LorenzGaugeField(imex, ρJs, (zeros(ComplexF64, NX, NY) for _ in 1:18)...,
+    EBxyz, Float64.((B0x, B0y, B0z)), gps, ffthelper, boris, dt)
+end
+struct LorenzGaugeStaggeredField{T, U} <: AbstractLorenzGaugeField
+  imex::T
+  ρJs⁻::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ρJs⁰::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ρJs⁺::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ρJsᵗ::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ϕ⁺::Array{ComplexF64, 2}
+  ϕ⁰::Array{ComplexF64, 2}
+  ϕ⁻::Array{ComplexF64, 2}
+  Ax⁺::Array{ComplexF64, 2}
+  Ay⁺::Array{ComplexF64, 2}
+  Az⁺::Array{ComplexF64, 2}
+  Ax⁻::Array{ComplexF64, 2}
+  Ay⁻::Array{ComplexF64, 2}
+  Az⁻::Array{ComplexF64, 2}
+  Ax⁰::Array{ComplexF64, 2}
+  Ay⁰::Array{ComplexF64, 2}
+  Az⁰::Array{ComplexF64, 2}
+  Ex::Array{ComplexF64, 2}
+  Ey::Array{ComplexF64, 2}
+  Ez::Array{ComplexF64, 2}
+  ρ⁻::Array{ComplexF64, 2}
+  ρ⁰::Array{ComplexF64, 2}
+  ρ⁺::Array{ComplexF64, 2}
+  Jx⁻::Array{ComplexF64, 2}
+  Jy⁻::Array{ComplexF64, 2}
+  Jz⁻::Array{ComplexF64, 2}
+  Jx⁰::Array{ComplexF64, 2}
+  Jy⁰::Array{ComplexF64, 2}
+  Jz⁰::Array{ComplexF64, 2}
+  Jx⁺::Array{ComplexF64, 2}
+  Jy⁺::Array{ComplexF64, 2}
+  Jz⁺::Array{ComplexF64, 2}
+  Bx::Array{ComplexF64, 2}
+  By::Array{ComplexF64, 2}
+  Bz::Array{ComplexF64, 2}
+  EBxyz::OffsetArray{Float64, 3, Array{Float64, 3}}
+  B0::NTuple{3, Float64}
+  gridparams::GridParameters
+  ffthelper::U
+  boris::ElectromagneticBoris
+  dt::Float64
+end
+
+function LorenzGaugeStaggeredField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
+    imex::AbstractImEx=Explicit(), buffer=0)
+  EBxyz = OffsetArray(zeros(6, NX+2buffer, NY+2buffer), 1:6, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer);
+  gps = GridParameters(Lx, Ly, NX, NY)
+  ffthelper = FFTHelper(NX, NY, Lx, Ly)
+  boris = ElectromagneticBoris(dt)
+  ρJs = OffsetArray(zeros(4, NX+2buffer, NY+2buffer, nthreads()),
+    1:4, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
+  return LorenzGaugeStaggeredField(imex, ρJs, deepcopy(ρJs), deepcopy(ρJs),
+    deepcopy(ρJs), (zeros(ComplexF64, NX, NY) for _ in 1:30)..., EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris, dt)
+end
+
+
+
+struct LorenzGaugeSemiImplicitField{T, U} <: AbstractLorenzGaugeField
+  imex::T
+  ρJs⁻::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ρJs⁰::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ρJs⁺::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ρJsᵗ::OffsetArray{Float64, 4, Array{Float64, 4}}
+  ϕ⁺::Array{ComplexF64, 2}
+  ϕ⁰::Array{ComplexF64, 2}
+  ϕ⁻::Array{ComplexF64, 2}
+  Ax⁺::Array{ComplexF64, 2}
+  Ay⁺::Array{ComplexF64, 2}
+  Az⁺::Array{ComplexF64, 2}
+  Ax⁻::Array{ComplexF64, 2}
+  Ay⁻::Array{ComplexF64, 2}
+  Az⁻::Array{ComplexF64, 2}
+  Ax⁰::Array{ComplexF64, 2}
+  Ay⁰::Array{ComplexF64, 2}
+  Az⁰::Array{ComplexF64, 2}
+  Ex::Array{ComplexF64, 2}
+  Ey::Array{ComplexF64, 2}
+  Ez::Array{ComplexF64, 2}
+  ρ⁻::Array{ComplexF64, 2}
+  ρ⁰::Array{ComplexF64, 2}
+  ρ⁺::Array{ComplexF64, 2}
+  Jx⁻::Array{ComplexF64, 2}
+  Jy⁻::Array{ComplexF64, 2}
+  Jz⁻::Array{ComplexF64, 2}
+  Jx⁰::Array{ComplexF64, 2}
+  Jy⁰::Array{ComplexF64, 2}
+  Jz⁰::Array{ComplexF64, 2}
+  Jx⁺::Array{ComplexF64, 2}
+  Jy⁺::Array{ComplexF64, 2}
+  Jz⁺::Array{ComplexF64, 2}
+  Bx::Array{ComplexF64, 2}
+  By::Array{ComplexF64, 2}
+  Bz::Array{ComplexF64, 2}
+  EBxyz::OffsetArray{Float64, 3, Array{Float64, 3}}
+  B0::NTuple{3, Float64}
+  gridparams::GridParameters
+  ffthelper::U
+  boris::ElectromagneticBoris
+  dt::Float64
+  rtol::Float64
+  maxiters::Int
+end
+
+function LorenzGaugeSemiImplicitField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
+    imex::AbstractImEx=Explicit(), buffer=0, rtol=sqrt(eps()), maxiters=10)
+  EBxyz = OffsetArray(zeros(6, NX+2buffer, NY+2buffer), 1:6, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer);
+  gps = GridParameters(Lx, Ly, NX, NY)
+  ffthelper = FFTHelper(NX, NY, Lx, Ly)
+  boris = ElectromagneticBoris(dt)
+  ρJs = OffsetArray(zeros(4, NX+2buffer, NY+2buffer, nthreads()),
+    1:4, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
+  return LorenzGaugeSemiImplicitField(imex, ρJs, deepcopy(ρJs), deepcopy(ρJs),
+    deepcopy(ρJs), (zeros(ComplexF64, NX, NY) for _ in 1:30)..., EBxyz,
+    Float64.((B0x, B0y, B0z)), gps, ffthelper, boris, dt, rtol, maxiters)
 end
 
 theta(::Explicit) = 0
 theta(imex::ImEx) = imex.θ
 theta(::Implicit) = 1
 
-function update!(f::LorenzGaugeField)
-  # expand offset arrays, applyperiodicity!(oa, a)
-  if useoldmethod
-    f.EBxyz[1, :, :] .= real.(f.Ex)
-    f.EBxyz[2, :, :] .= real.(f.Ey)
-    f.EBxyz[3, :, :] .= real.(f.Ez)
-    f.EBxyz[4, :, :] .= real.(f.Bx) .+ f.B0[1]
-    f.EBxyz[5, :, :] .= real.(f.By) .+ f.B0[2]
-    f.EBxyz[6, :, :] .= real.(f.Bz) .+ f.B0[3]
-  else
-    f.EBxyz .= 0.0
-    applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
-    applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
-    applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
-    applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
-    applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
-    applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
-    @views for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
-      f.EBxyz[i+3, j, k] += f.B0[i]
-    end
+function update!(f::AbstractLorenzGaugeField)
+  f.EBxyz .= 0.0
+  applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+  applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+  applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+  applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+  applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+  applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+  @views for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
+    f.EBxyz[i+3, j, k] += f.B0[i]
   end
-  #println(f.EBxyz[1:6, 1, 1], " ", f.EBxyz[1:6, end, end], " ", f.EBxyz[1:6, 10, 10])
 end
 
 function reduction!(a, z)
   @. a = 0.0
-  for k in axes(z, 3), j in axes(a, 2), i in axes(a, 1)
-    a[i, j] += z[i, j, k]
-    z[i, j, k] = 0.0
+  @views for k in axes(z, 3)
+    applyperiodicity!(a, z[:, :, k])
   end
-  #@views for k in axes(z, 3)
-  #  applyperiodicity!(a, z[:, :, k])
-  #end
-  #z .= 0
+end
+
+function reduction!(a, b, c, z)
+  @assert size(z, 1) == 4
+  @. a = 0.0
+  @. b = 0.0
+  @. c = 0.0
+  @views for k in axes(z, 4)
+    applyperiodicity!(a, z[1, :, :, k])
+  end
+  @views for k in axes(z, 4)
+    applyperiodicity!(b, z[2, :, :, k])
+  end
+  @views for k in axes(z, 4)
+    applyperiodicity!(c, z[3, :, :, k])
+  end
 end
 
 function reduction!(a, b, c, d, z)
@@ -368,36 +492,18 @@ function reduction!(a, b, c, d, z)
   @. b = 0.0
   @. c = 0.0
   @. d = 0.0
-
-  if useoldmethod
-    for k in axes(z, 4), j in axes(a, 2), i in axes(a, 1)
-      a[i, j] += z[1, i, j, k]
-      b[i, j] += z[2, i, j, k]
-      c[i, j] += z[3, i, j, k]
-      d[i, j] += z[4, i, j, k]
-      for h in axes(z, 1)
-        z[h, i, j, k] = 0.0
-      end
-    end
-  else
-    @views for k in axes(z, 4)
-      applyperiodicity!(a, z[1, :, :, k])
-    end
-    @views for k in axes(z, 4)
-      applyperiodicity!(b, z[2, :, :, k])
-    end
-    @views for k in axes(z, 4)
-      applyperiodicity!(c, z[3, :, :, k])
-    end
-    @views for k in axes(z, 4)
-      applyperiodicity!(d, z[4, :, :, k])
-    end
-    z .= 0
+  @views for k in axes(z, 4)
+    applyperiodicity!(a, z[1, :, :, k])
   end
-  #println(a[1, 1], " ", a[end÷2, end÷2],  " ",a[end, end])
-  #println(b[1, 1], " ", b[end÷2, end÷2],  " ",b[end, end])
-  #println(c[1, 1], " ", c[end÷2, end÷2],  " ",c[end, end])
-  #println(d[1, 1], " ", d[end÷2, end÷2],  " ",d[end, end])
+  @views for k in axes(z, 4)
+    applyperiodicity!(b, z[2, :, :, k])
+  end
+  @views for k in axes(z, 4)
+    applyperiodicity!(c, z[3, :, :, k])
+  end
+  @views for k in axes(z, 4)
+    applyperiodicity!(d, z[4, :, :, k])
+  end
 end
 
 # E = -∇ ϕ
@@ -406,7 +512,7 @@ end
 # ϕ = ρ / (kx^2 + ky^2)
 # Ex = - ∇_x ϕ = - i kx ϕ = - i kx ρ / (kx^2 + ky^2)
 # Ey = - ∇_y ϕ = - i ky ϕ = - i ky ρ / (kx^2 + ky^2)
-function loop!(plasma, field::ElectrostaticField, to, t)
+function loop!(plasma, field::ElectrostaticField, to, t, _)
   dt = timestep(field)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
   NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
@@ -436,6 +542,7 @@ function loop!(plasma, field::ElectrostaticField, to, t)
 
   @timeit to "Field Reduction" begin
     reduction!(field.ϕ, field.ρs)
+    field.ρs .= 0
   end
   @timeit to "Field Forward FT" begin
     field.ffthelper.pfft! * field.ϕ;
@@ -476,6 +583,15 @@ function lorenzgauge!(imex::AbstractImEx, xⁿ, xⁿ⁻¹, sⁿ, k², dt²)
     xⁿ[i] = xⁿ⁺¹
   end
 end
+function lorenzgauge!(imex::AbstractImEx, xⁿ⁺¹, xⁿ, xⁿ⁻¹, sⁿ⁺¹, sⁿ, sⁿ⁻¹, k², dt²)
+  θ = theta(imex)
+  @threads for i in eachindex(xⁿ)
+    num = numerator(imex, dt², k²[i])
+    den = denominator(imex, dt², k²[i])
+    xⁿ⁺¹[i] = (num * xⁿ[i] + dt² * (θ/2 * sⁿ⁻¹[i] + (1 - θ) * sⁿ[i] + θ/2 * sⁿ⁺¹[i])) / den - xⁿ⁻¹[i]
+  end
+end
+
 
 # E = -∇ϕ - ∂ₜA
 # B = ∇xA
@@ -493,7 +609,7 @@ end
 # push v⁰ to v⁺ with Eʰ and Bʰ
 # push xʰ to x⁺ with v⁺
 # 4) copy fields into buffers for next loop
-function loop!(plasma, field::LorenzGaugeField, to, t)
+function loop!(plasma, field::LorenzGaugeField, to, t, _)
   dt = timestep(field)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
   NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
@@ -520,61 +636,69 @@ function loop!(plasma, field::LorenzGaugeField, to, t)
           # spatial advection, effectively using v at (n+1/2)
           x[i] = unimod(x[i] + (vxi + vx[i]) / 2 * dt, Lx)
           y[i] = unimod(y[i] + (vyi + vy[i]) / 2 * dt, Ly)
+
+          #    Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
+          #    vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+          #      Bxi, Byi, Bzi, q_m);
+          #    x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
+          #    y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
+          #    # deposit J at the (n+1/2)th point
+          #    deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+          #      vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+          #    x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
+          #    y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
+          #    # now deposit ρ at (n+1)th timestep
+          #    deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
+
+          #####x[i] = unimod(x[i] + vx[i] / 2 * dt, Lx)
+          #####y[i] = unimod(y[i] + vy[i] / 2 * dt, Ly)
+          #####Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
+          ###### accelerate velocities from n to (n+1)
+          #####vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+          #####  Bxi, Byi, Bzi, q_m);
+          #####x[i] = unimod(x[i] + vx[i] / 2 * dt, Lx)
+          #####y[i] = unimod(y[i] + vy[i] / 2 * dt, Ly)
+
           # now deposit at (n+1)th timestep
           deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
                      qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
         end
-        #@show maximum(abs, vx) * dt * NX_Lx
-        #@show maximum(abs, vy) * NY_Ly * dt
       end
     end
   end
   @timeit to "Field Reduction" begin
-    reduction!(field.ρ, field.Jx, field.Jy, field.Jz, field.ρJs)
-   # mρ = mean(field.ρ)
-   # t > 0 && (field.ρ .= 0.0)
-   # if t == 0
-   # #  for i in eachindex(field.ρ)
-   # #    field.ρ[i] = (10  +  (rand() - 0.5))
-   # #  end
-   # field.ρ .= 0.0
-   # #field.ρ[1, 1] = 1.0
-   # field.ϕ⁻[1, 1] = 1.0 # one pixel
-   # field.ffthelper.pfft! * field.ϕ⁻
-   # end
-   # field.Jx .= 0.0
-   # field.Jy .= 0.0
-   # field.Jz .= 0.0
+    reduction!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs)
+    field.ρJs .= 0
   end
   @timeit to "Field Forward FT" begin
-    field.ffthelper.pfft! * field.ρ;
-    field.ffthelper.pfft! * field.Jx;
-    field.ffthelper.pfft! * field.Jy;
-    field.ffthelper.pfft! * field.Jz;
+    field.ffthelper.pfft! * field.ρ⁺;
+    field.ffthelper.pfft! * field.Jx⁺;
+    field.ffthelper.pfft! * field.Jy⁺;
+    field.ffthelper.pfft! * field.Jz⁺;
   end
   @timeit to "Field Solve" begin
-    field.ρ[1, 1] = 0
-    field.Jx[1, 1] = 0
-    field.Jy[1, 1] = 0
-    field.Jz[1, 1] = 0
+    field.ρ⁺[1, 1] = 0
+    field.Jx⁺[1, 1] = 0
+    field.Jy⁺[1, 1] = 0
+    field.Jz⁺[1, 1] = 0
     # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
-    lorenzgauge!(field.imex, field.ϕ, field.ϕ⁻, field.ρ, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Ax, field.Ax⁻, field.Jx, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Ay, field.Ay⁻, field.Jy, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Az, field.Az⁻, field.Jz, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.ϕ⁺, field.ϕ⁰, field.ρ⁺, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Jx⁺, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Jy⁺, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Jz⁺, field.ffthelper.k², dt^2)
     # at this point (ϕ, Ai) stores the (n+1)th timestep value and (ϕ⁻, Ai⁻) the nth
     # Now calculate the value of E and B at n+1/2
     # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
     # Bʰ = ∇x(A⁺ + A⁰)/2
-    @. field.Ex = -im * field.ffthelper.kx * (field.ϕ + field.ϕ⁻) / 2
-    @. field.Ey = -im * field.ffthelper.ky * (field.ϕ + field.ϕ⁻) / 2
-    @. field.Ex -= (field.Ax - field.Ax⁻)/dt
-    @. field.Ey -= (field.Ay - field.Ay⁻)/dt
-    @. field.Ez = -(field.Az - field.Az⁻)/dt
-    @. field.Bx = im * field.ffthelper.ky * (field.Az + field.Az⁻) / 2
-    @. field.By = -im * field.ffthelper.kx * (field.Az + field.Az⁻) / 2
-    @. field.Bz = im * field.ffthelper.kx * (field.Ay + field.Ay⁻) / 2
-    @. field.Bz -= im * field.ffthelper.ky * (field.Ax + field.Ax⁻) / 2
+    @. field.Ex = -im * field.ffthelper.kx * (field.ϕ⁺ + field.ϕ⁰) / 2
+    @. field.Ey = -im * field.ffthelper.ky * (field.ϕ⁺ + field.ϕ⁰) / 2
+    @. field.Ex -= (field.Ax⁺ - field.Ax⁰)/dt
+    @. field.Ey -= (field.Ay⁺ - field.Ay⁰)/dt
+    @. field.Ez = -(field.Az⁺ - field.Az⁰)/dt
+    @. field.Bx = im * field.ffthelper.ky * (field.Az⁺ + field.Az⁰) / 2
+    @. field.By = -im * field.ffthelper.kx * (field.Az⁺ + field.Az⁰) / 2
+    @. field.Bz = im * field.ffthelper.kx * (field.Ay⁺ + field.Ay⁰) / 2
+    @. field.Bz -= im * field.ffthelper.ky * (field.Ax⁺ + field.Ax⁰) / 2
   end
   @timeit to "Field Inverse FT" begin
     field.ffthelper.pifft! * field.Ex
@@ -587,16 +711,311 @@ function loop!(plasma, field::LorenzGaugeField, to, t)
   @timeit to "Field Update" update!(field)
 end
 
+warmup!(field::AbstractField, plasma, to) = field
+
+function warmup!(field::LorenzGaugeStaggeredField, plasma, to)
+  @timeit to "Warmup" begin
+    dt = timestep(field)
+    Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
+    NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
+    ΔV = cellvolume(field.gridparams)
+    field.ρJs⁻ .= 0
+    field.ρJs⁰ .= 0
+    field.ρJs⁺ .= 0
+    @timeit to "Particle Loop" begin
+      @threads for j in axes(field.ρJs⁺, 4)
+        ρJ⁻ = @view field.ρJs⁻[:, :, :, j]
+        ρJ⁰ = @view field.ρJs⁰[:, :, :, j]
+        ρJ⁺ = @view field.ρJs⁺[:, :, :, j]
+        for species in plasma
+          qw_ΔV = species.charge * species.weight / ΔV
+          x = @view positions(species)[1, :]
+          y = @view positions(species)[2, :]
+          vx = @view velocities(species)[1, :]
+          vy = @view velocities(species)[2, :]
+          vz = @view velocities(species)[3, :]
+          #  E.....E.....E
+          #  B.....B.....B
+          #  ϕ.....ϕ.....ϕ
+          #  -..A..0..A..+..A
+          #  ρ.....ρ.....ρ
+          #  -..J..0..J..+..J
+          #  x.....x.....+
+          #  -..v..0..v..+..v
+          for i in species.chunks[j]
+            x[i] = unimod(x[i] - vx[i] * dt, Lx)
+            y[i] = unimod(y[i] - vy[i] * dt, Ly)
+            deposit!(ρJ⁻, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+              qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+            x[i] = unimod(x[i] + vx[i] * dt, Lx)
+            y[i] = unimod(y[i] + vy[i] * dt, Ly)
+            deposit!(ρJ⁰, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+              qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+            x[i] = unimod(x[i] + vx[i] * dt, Lx)
+            y[i] = unimod(y[i] + vy[i] * dt, Ly)
+            deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+              qw_ΔV, vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+            x[i] = unimod(x[i] - vx[i] * dt, Lx)
+            y[i] = unimod(y[i] - vy[i] * dt, Ly)
+          end
+        end
+      end
+    end
+    @timeit to "Field Reduction" begin
+      reduction!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁻)
+      reduction!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁰)
+      reduction!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺)
+    end
+  end
+end
+
+
+function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
+  dt = timestep(field)
+  Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
+  NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
+  ΔV = cellvolume(field.gridparams)
+
+  @timeit to "Particle Loop" begin
+    @threads for j in axes(field.ρJs⁺, 4)
+      ρJ = @view field.ρJs⁺[:, :, :, j]
+      for species in plasma
+        qw_ΔV = species.charge * species.weight / ΔV
+        q_m = species.charge / species.mass
+        x = @view positions(species)[1, :]
+        y = @view positions(species)[2, :]
+        vx = @view velocities(species)[1, :]
+        vy = @view velocities(species)[2, :]
+        vz = @view velocities(species)[3, :]
+        #  E.....E.....E
+        #  B.....B.....B
+        #  ϕ.....ϕ.....ϕ
+        #  -..A..0..A..+..A
+        #  ρ.....ρ.....ρ
+        #  -..J..0..J..+..J
+        #  x.....x.....x
+        #  -..v..0..v..+..v
+        for i in species.chunks[j]
+          Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
+          vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+            Bxi, Byi, Bzi, q_m);
+          x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
+          y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
+          # deposit J at the (n+1/2)th point
+          deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+            vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+          x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
+          y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
+          # now deposit ρ at (n+1)th timestep
+          deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
+        end
+      end
+    end
+  end
+  @timeit to "Field Reduction" begin
+    reduction!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺)
+    field.ρJs⁺ .= 0
+  end
+  @timeit to "Field Forward FT" begin
+    field.ffthelper.pfft! * field.ρ⁺;
+    field.ffthelper.pfft! * field.Jx⁺;
+    field.ffthelper.pfft! * field.Jy⁺;
+    field.ffthelper.pfft! * field.Jz⁺;
+  end
+  @timeit to "Field Solve" begin
+    field.ρ⁺[1, 1] = 0
+    field.Jx⁺[1, 1] = 0
+    field.Jy⁺[1, 1] = 0
+    field.Jz⁺[1, 1] = 0
+    # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
+    lorenzgauge!(field.imex, field.ϕ⁺, field.ϕ⁰,  field.ϕ⁻, field.ρ⁺, field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁺, field.Jx⁰, field.Jx⁻, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁺, field.Jy⁰, field.Jy⁻, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁺, field.Jz⁰, field.Jz⁻, field.ffthelper.k², dt^2)
+  end
+  # at this point (ϕ, Ai) stores the (n+1)th timestep value and (ϕ⁻, Ai⁻) the nth
+  # Now calculate the value of E and B at n+1/2
+  # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
+  # Bʰ = ∇x(A⁺ + A⁰)/2
+  # xʰ = (-x⁻ + 6x⁰ + 3x¹) / 8
+
+  #  E.....E.....E
+  #  B.....B.....B
+  #  ϕ.....ϕ.....ϕ
+  #  -..A..0..A..+..A
+  #  ρ.....ρ.....ρ
+  #  -..J..0..J..+..J
+  #  x.....x.....x
+  #  -..v..0..v..+..v
+  @timeit to "Calculate E, B" begin
+    θ = theta(field.imex)
+    @. field.Ex = -im * field.ffthelper.kx * field.ϕ⁰
+    @. field.Ey = -im * field.ffthelper.ky * field.ϕ⁰
+    @. field.Ex -= (field.Ax⁰ - field.Ax⁻)/dt
+    @. field.Ey -= (field.Ay⁰ - field.Ay⁻)/dt
+    @. field.Ez = -(field.Az⁰ - field.Az⁻)/dt
+    @. field.Bx =  im * field.ffthelper.ky * (field.Az⁻ + field.Az⁰)/2
+    @. field.By = -im * field.ffthelper.kx * (field.Az⁻ + field.Az⁰)/2
+    @. field.Bz =  im * field.ffthelper.kx * (field.Ay⁻ + field.Ay⁰)/2
+    @. field.Bz -= im * field.ffthelper.ky * (field.Ax⁻ + field.Ax⁰)/2
+  end
+  @timeit to "Field Inverse FT" begin
+    field.ffthelper.pifft! * field.Ex
+    field.ffthelper.pifft! * field.Ey
+    field.ffthelper.pifft! * field.Ez
+    field.ffthelper.pifft! * field.Bx
+    field.ffthelper.pifft! * field.By
+    field.ffthelper.pifft! * field.Bz
+  end
+  @timeit to "Field Update" update!(field)
+  @timeit to "Copy over buffers" begin
+    field.ρJs⁻ .= field.ρJs⁰
+    field.ρJs⁰ .= field.ρJs⁺
+    field.ϕ⁻ .= field.ϕ⁰
+    field.ϕ⁰ .= field.ϕ⁺
+    field.Ax⁻ .= field.Ax⁰
+    field.Ax⁰ .= field.Ax⁺
+    field.Ay⁻ .= field.Ay⁰
+    field.Ay⁰ .= field.Ay⁺
+    field.Az⁻ .= field.Az⁰
+    field.Az⁰ .= field.Az⁺
+  end
+end
+
+function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = deepcopy(plasma))
+  dt = timestep(field)
+  Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
+  NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
+  ΔV = cellvolume(field.gridparams)
+
+  copyto!.(plasmacopy, plasma)
+  firstloop = true
+  iters = 0
+  field.ρJsᵗ[1] = Inf
+  #while firstloop || (iters < field.maxiters)
+  while !isapprox(field.ρJsᵗ, field.ρJs⁺, rtol=field.rtol, atol=0)# && (iters < field.maxiters)
+    iters += 1
+    iters > field.maxiters && break
+    copyto!.(plasma, plasmacopy)
+    field.ρJsᵗ .= field.ρJs⁺
+    field.ρJs⁺ .= 0
+    @timeit to "Particle Loop" begin
+      @threads for j in axes(field.ρJs⁺, 4)
+        ρJ = @view field.ρJs⁺[:, :, :, j]
+        for species in plasma
+          qw_ΔV = species.charge * species.weight / ΔV
+          q_m = species.charge / species.mass
+          x = @view positions(species)[1, :]
+          y = @view positions(species)[2, :]
+          vxʰ = @view velocities(species; work=true)[1, :]
+          vyʰ = @view velocities(species; work=true)[2, :]
+          vx = @view velocities(species)[1, :]
+          vy = @view velocities(species)[2, :]
+          vz = @view velocities(species)[3, :]
+          #  E.....E.....E
+          #  B.....B.....B
+          #  ϕ.....ϕ.....ϕ
+          #  -..A..0..A..+..A
+          #  ρ.....ρ.....ρ
+          #  -..J..0..J..+..J
+          #  x.....x.....x
+          #  -..v..0..v..+..v
+          for i in species.chunks[j]
+            Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
+            vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+              Bxi, Byi, Bzi, q_m);
+            x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
+            y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
+            # deposit J at the (n+1/2)th point
+            deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+              vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+            x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
+            y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
+            # now deposit ρ at (n+1)th timestep
+            deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
+          end
+        end
+      end
+    end
+    @timeit to "Field Reduction" begin
+      reduction!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺)
+      #field.ρJs⁺ .= 0 # dont zero it here!
+    end
+    @timeit to "Field Forward FT" begin
+      field.ffthelper.pfft! * field.ρ⁺;
+      field.ffthelper.pfft! * field.Jx⁺;
+      field.ffthelper.pfft! * field.Jy⁺;
+      field.ffthelper.pfft! * field.Jz⁺;
+    end
+    @timeit to "Field Solve" begin
+      field.ρ⁺[1, 1] = 0
+      field.Jx⁺[1, 1] = 0
+      field.Jy⁺[1, 1] = 0
+      field.Jz⁺[1, 1] = 0
+      # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
+      lorenzgauge!(field.imex, field.ϕ⁺, field.ϕ⁰,  field.ϕ⁻, field.ρ⁺, field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2)
+      lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁺, field.Jx⁰, field.Jx⁻, field.ffthelper.k², dt^2)
+      lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁺, field.Jy⁰, field.Jy⁻, field.ffthelper.k², dt^2)
+      lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁺, field.Jz⁰, field.Jz⁻, field.ffthelper.k², dt^2)
+    end
+    # at this point (ϕ, Ai) stores the (n+1)th timestep value and (ϕ⁻, Ai⁻) the nth
+    # Now calculate the value of E and B at n+1/2
+    # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
+    # Bʰ = ∇x(A⁺ + A⁰)/2
+    # xʰ = (-x⁻ + 6x⁰ + 3x¹) / 8
+
+    #  E.....E.....E
+    #  B.....B.....B
+    #  ϕ.....ϕ.....ϕ
+    #  -..A..0..A..+..A
+    #  ρ.....ρ.....ρ
+    #  -..J..0..J..+..J
+    #  x.....x.....x
+    #  -..v..0..v..+..v
+    @timeit to "Calculate E, B" begin
+      θ = theta(field.imex)
+      @. field.Ex = -im * field.ffthelper.kx * (0field.ϕ⁻ + field.ϕ⁰ + 0field.ϕ⁺)
+      @. field.Ey = -im * field.ffthelper.ky * (0field.ϕ⁻ + field.ϕ⁰ + 0field.ϕ⁺)
+      @. field.Ex -= (0field.Ax⁺ + field.Ax⁰ - field.Ax⁻)/dt
+      @. field.Ey -= (0field.Ay⁺ + field.Ay⁰ - field.Ay⁻)/dt
+      @. field.Ez = -(0field.Az⁺ + field.Az⁰ - field.Az⁻)/dt
+      @. field.Bx =  im * field.ffthelper.ky * (field.Az⁻/2 + field.Az⁰/2 + 0field.Az⁺)
+      @. field.By = -im * field.ffthelper.kx * (field.Az⁻/2 + field.Az⁰/2 + 0field.Az⁺)
+      @. field.Bz =  im * field.ffthelper.kx * (field.Ay⁻/2 + field.Ay⁰/2 + 0field.Ay⁺)
+      @. field.Bz -= im * field.ffthelper.ky * (field.Ax⁻/2 + field.Ax⁰/2 + 0field.Ax⁺)
+    end
+    @timeit to "Field Inverse FT" begin
+      field.ffthelper.pifft! * field.Ex
+      field.ffthelper.pifft! * field.Ey
+      field.ffthelper.pifft! * field.Ez
+      field.ffthelper.pifft! * field.Bx
+      field.ffthelper.pifft! * field.By
+      field.ffthelper.pifft! * field.Bz
+    end
+    @timeit to "Field Update" update!(field)
+  end
+  @show iters
+  @timeit to "Copy over buffers" begin
+    field.ρJs⁻ .= field.ρJs⁰
+    field.ρJs⁰ .= field.ρJs⁺
+    field.ϕ⁻ .= field.ϕ⁰
+    field.ϕ⁰ .= field.ϕ⁺
+    field.Ax⁻ .= field.Ax⁰
+    field.Ax⁰ .= field.Ax⁺
+    field.Ay⁻ .= field.Ay⁰
+    field.Ay⁰ .= field.Ay⁺
+    field.Az⁻ .= field.Az⁰
+    field.Az⁰ .= field.Az⁺
+  end
+end
+
+
 
 @inline function depositindicesfractions(s::AbstractShape, z::Float64, NZ::Int,
     NZ_Lz::Float64)
   zNZ = z * NZ_Lz # floating point position in units of cells
   # no need for unimod with offset arrays
-i = if useoldmethod
-  unimod(ceil(Int, zNZ), NZ) # cell number
-else
-  ceil(Int, zNZ) # cell number
-end
+  i = ceil(Int, zNZ) # cell number
   r = i - zNZ; # distance into cell i in units of cell width
   @assert 0 < r <= 1 "$z, $NZ, $NZ_Lz, $i"
   return gridinteractiontuple(s, i, r, NZ)
@@ -605,11 +1024,7 @@ end
 @inline gridinteractiontuple(::NGPWeighting, i, r, NZ) = ((i, 1), )
 # no need for unimod with offset arrays
 @inline function gridinteractiontuple(::AreaWeighting, i, r, NZ)
-  if useoldmethod
-    return ((i, 1-r), (unimod(i+1, NZ), r))
-  else
-    return ((i, 1-r), (i+1, r))
-  end
+  return ((i, 1-r), (i+1, r))
 end
 
 bspline(::BSplineWeighting{@stat N}, x) where N = bspline(BSplineWeighting{Int(N)}(), x)
@@ -668,16 +1083,7 @@ end
   inds = indices(s, j)
   fractions = bspline(s, z)
   #@assert sum(fractions) ≈ 1 "$(sum(fractions)), $fractions"
-if useoldmethod
-  if (inds[1] < 1) || (inds[end] > NZ)
-    # no need for unimod with offset arrays
-    return zip(unimod.(inds, NZ), fractions)
-  else
-    return zip(inds, fractions)
-  end
-else
   return zip(inds, fractions)
-end
 end
 
 # NG = 64
@@ -721,7 +1127,7 @@ end
   return (Ex, Ey)
 end
 
-@inline function (f::LorenzGaugeField)(s::AbstractShape, xi, yi)
+@inline function (f::AbstractLorenzGaugeField)(s::AbstractShape, xi, yi)
   NX, NY = f.gridparams.NX, f.gridparams.NY
   NX_Lx, NY_Ly = f.gridparams.NX_Lx, f.gridparams.NY_Ly
   Ex = Ey = Ez = Bx = By = Bz = zero(real(eltype(f.EBxyz)))
@@ -739,11 +1145,39 @@ end
   return (Ex, Ey, Ez, Bx, By, Bz)
 end
 
-function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, w::Number)
+function deposit!(z::AbstractArray{<:Number, 2}, s::AbstractShape, x, y, NX_Lx, NY_Ly, w::Number)
   NX, NY = size(z)
   for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
     for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
       z[i,j] += wx * wy * w
+    end
+  end
+end
+
+function deposit!(z::AbstractArray{<:Number, 3}, s::AbstractShape, x, y, NX_Lx, NY_Ly, w1)
+  NV, NX, NY = size(z)
+  @assert NV == 4
+  for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
+    for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
+      wxy = wx * wy
+      @muladd z[1,i,j] = z[1,i,j] + wxy * w1
+      #@muladd z[2,i,j] = z[2,i,j] + wxy * w2
+      #@muladd z[3,i,j] = z[3,i,j] + wxy * w3
+      #@muladd z[4,i,j] = z[4,i,j] + wxy * w4
+    end
+  end
+end
+
+function deposit!(z::AbstractArray{<:Number, 3}, s::AbstractShape, x, y, NX_Lx, NY_Ly, w2, w3, w4)
+  NV, NX, NY = size(z)
+  @assert NV == 4
+  for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
+    for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
+      wxy = wx * wy
+      #@muladd z[1,i,j] = z[1,i,j] + wxy * w1
+      @muladd z[2,i,j] = z[2,i,j] + wxy * w2
+      @muladd z[3,i,j] = z[3,i,j] + wxy * w3
+      @muladd z[4,i,j] = z[4,i,j] + wxy * w4
     end
   end
 end
@@ -793,7 +1227,8 @@ function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
   end
 end
 
-function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to)
+function diagnose!(d::LorenzGaugeDiagnostics, f::AbstractLorenzGaugeField, plasma,
+    t, to)
   @timeit to "Diagnostics" begin
     t % d.ntskip == 0 && (d.ti[] += 1)
     if t % d.ntskip == 0
@@ -804,6 +1239,8 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to
       if t % d.ntskip == 0
         @timeit to "Energy" begin
           d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
+          totenergy = (d.fieldenergy[ti] + d.kineticenergy[ti]) / (d.fieldenergy[1] + d.kineticenergy[1])
+          @show ti, totenergy
         end
         @timeit to "Momentum" begin
           px, py, pz = 0.0, 0.0, 0.0
@@ -816,14 +1253,14 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to
         end
       end
       @timeit to "Field ifft!" begin
-        f.ffthelper.pifft! * f.Ax
-        f.ffthelper.pifft! * f.Ay
-        f.ffthelper.pifft! * f.Az
-        f.ffthelper.pifft! * f.ϕ
-        f.ffthelper.pifft! * f.ρ;
-        f.ffthelper.pifft! * f.Jx;
-        f.ffthelper.pifft! * f.Jy;
-        f.ffthelper.pifft! * f.Jz;
+        f.ffthelper.pifft! * f.Ax⁺
+        f.ffthelper.pifft! * f.Ay⁺
+        f.ffthelper.pifft! * f.Az⁺
+        f.ffthelper.pifft! * f.ϕ⁺
+        f.ffthelper.pifft! * f.ρ⁺;
+        f.ffthelper.pifft! * f.Jx⁺;
+        f.ffthelper.pifft! * f.Jy⁺;
+        f.ffthelper.pifft! * f.Jz⁺;
       end
       @timeit to "Field averaging" begin
         function average!(lhs, rhs)
@@ -842,24 +1279,24 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::LorenzGaugeField, plasma, t, to
         average!(d.Bxs, f.Bx)
         average!(d.Bys, f.By)
         average!(d.Bzs, f.Bz)
-        average!(d.Axs, f.Ax)
-        average!(d.Ays, f.Ay)
-        average!(d.Azs, f.Az)
-        average!(d.ϕs, f.ϕ)
-        average!(d.ρs, f.ρ)
-        average!(d.Jxs, f.Jx)
-        average!(d.Jys, f.Jy)
-        average!(d.Jzs, f.Jz)
+        average!(d.Axs, f.Ax⁺)
+        average!(d.Ays, f.Ay⁺)
+        average!(d.Azs, f.Az⁺)
+        average!(d.ϕs, f.ϕ⁺)
+        average!(d.ρs, f.ρ⁺)
+        average!(d.Jxs, f.Jx⁺)
+        average!(d.Jys, f.Jy⁺)
+        average!(d.Jzs, f.Jz⁺)
       end
       @timeit to "Field fft!" begin
-        f.ffthelper.pfft! * f.Ax
-        f.ffthelper.pfft! * f.Ay
-        f.ffthelper.pfft! * f.Az
-        f.ffthelper.pfft! * f.ϕ
-        #f.ffthelper.pfft! * f.ρ; # not necessary to transform back - they're overwritten
-        #f.ffthelper.pfft! * f.Jx;
-        #f.ffthelper.pfft! * f.Jy;
-        #f.ffthelper.pfft! * f.Jz;
+        f.ffthelper.pfft! * f.Ax⁺
+        f.ffthelper.pfft! * f.Ay⁺
+        f.ffthelper.pfft! * f.Az⁺
+        f.ffthelper.pfft! * f.ϕ⁺
+        #f.ffthelper.pfft! * f.ρ⁺; # not necessary to transform back - they're overwritten
+        #f.ffthelper.pfft! * f.Jx⁺;
+        #f.ffthelper.pfft! * f.Jy⁺;
+        #f.ffthelper.pfft! * f.Jz⁺;
       end
     end
   end
@@ -876,7 +1313,6 @@ function diagnosticfields(d::LorenzGaugeDiagnostics)
           (d.Jxs, "Jx"), (d.Jys, "Jy"), (d.Jzs, "Jz"),
           (d.ϕs, "ϕ"), (d.ρs, "ρ"))
 end
-
 
 function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
   B0 = norm(field.B0)
