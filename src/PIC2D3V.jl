@@ -825,16 +825,15 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   end
   @timeit to "Field Solve" begin
     # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
-    lorenzgauge!(field.imex, field.ϕ⁺,  field.ϕ⁰,  field.ϕ⁻,  field.ρ⁺,  field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁺, field.Jx⁰, field.Jx⁻, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁺, field.Jy⁰, field.Jy⁻, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁺, field.Jz⁰, field.Jz⁻, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.ϕ⁺,  field.ϕ⁰,  field.ϕ⁻,  field.ρ⁰,  field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁰, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁰, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁰, field.ffthelper.k², dt^2)
   end
   # at this point (ϕ, Ai) stores the (n+1)th timestep value and (ϕ⁻, Ai⁻) the nth
   # Now calculate the value of E and B at n+1/2
-  # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
+  # Eʰ = -∇ϕ⁺ - (A⁺ - A⁰)/dt
   # Bʰ = ∇x(A⁺ + A⁰)/2
-  # xʰ = (-x⁻ + 6x⁰ + 3x¹) / 8
 
   #  E.....E.....E
   #  B.....B.....B
@@ -845,16 +844,6 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   #  x.....x.....x
   #  -..v..0..v..+..v
   @timeit to "Calculate E, B" begin
-    #θ = theta(field.imex)
-    #@. field.Ex = -im * field.ffthelper.kx * field.ϕ⁰
-    #@. field.Ey = -im * field.ffthelper.ky * field.ϕ⁰
-    #@. field.Ex -= (field.Ax⁰ - field.Ax⁻)/dt
-    #@. field.Ey -= (field.Ay⁰ - field.Ay⁻)/dt
-    #@. field.Ez = -(field.Az⁰ - field.Az⁻)/dt
-    #@. field.Bx =  im * field.ffthelper.ky * (field.Az⁻ + field.Az⁰)/2
-    #@. field.By = -im * field.ffthelper.kx * (field.Az⁻ + field.Az⁰)/2
-    #@. field.Bz =  im * field.ffthelper.kx * (field.Ay⁻ + field.Ay⁰)/2
-    #@. field.Bz -= im * field.ffthelper.ky * (field.Ax⁻ + field.Ax⁰)/2
     @. field.Ex = -im * field.ffthelper.kx * field.ϕ⁺
     @. field.Ey = -im * field.ffthelper.ky * field.ϕ⁺
     @. field.Ex -= (field.Ax⁺ - field.Ax⁰)/dt
