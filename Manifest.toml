@@ -2,7 +2,7 @@
 
 julia_version = "1.8.5"
 manifest_format = "2.0"
-project_hash = "98938a9dd5ac26ca19b45058ddd42c41c9a6ef4b"
+project_hash = "bbbe77f65ac5b174eee7c688e51fd2f2d75f2e22"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -264,6 +264,11 @@ deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "c6033cc3892d0ef5bb9cd29b7f2f0331ea5184ea"
 uuid = "f5851436-0d7a-5f13-b9de-f02708fd171a"
 version = "3.3.10+0"
+
+[[deps.FastPow]]
+git-tree-sha1 = "7d961335144dad74de0e1b3a9b60e4d114a78dc2"
+uuid = "c0e83750-1142-43a8-81cf-6c956b72b4d1"
+version = "0.1.0"
 
 [[deps.FileIO]]
 deps = ["Pkg", "Requires", "UUIDs"]

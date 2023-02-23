@@ -3,7 +3,7 @@ module PIC2D3V
 using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Random
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, MuladdMacro, CommonSubexpressions
-using TimerOutputs, StaticNumbers, OffsetArrays
+using TimerOutputs, StaticNumbers, OffsetArrays, FastPow, ThreadsX
 
 unimod(x, n) = x > n ? x - n : x > 0 ? x : x + n
 
@@ -159,11 +159,6 @@ function velocities(s::Species; work=false)
   return work ? (@view s.xyvwork[3:5, :]) : (@view s.xyv[3:5, :])
 end
 xyvchunk(s::Species, i::Int) = @view s.xyv[:, s.chunks[i]]
-
-function copyto!(s::Species)
-  @tturbo s.xyvwork .= src.xyv
-  return s
-end
 
 function copyto!(dest::Species, src::Species)
   @tturbo dest.xyv .= src.xyv
@@ -384,8 +379,9 @@ end
 
 
 
-struct LorenzGaugeSemiImplicitField{T, U} <: AbstractLorenzGaugeField
-  imex::T
+struct LorenzGaugeSemiImplicitField{T, U, V} <: AbstractLorenzGaugeField
+  fieldimex::T
+  sourceimex::U
   ρJs⁻::OffsetArray{Float64, 4, Array{Float64, 4}}
   ρJs⁰::OffsetArray{Float64, 4, Array{Float64, 4}}
   ρJs⁺::OffsetArray{Float64, 4, Array{Float64, 4}}
@@ -423,7 +419,7 @@ struct LorenzGaugeSemiImplicitField{T, U} <: AbstractLorenzGaugeField
   EBxyz::OffsetArray{Float64, 3, Array{Float64, 3}}
   B0::NTuple{3, Float64}
   gridparams::GridParameters
-  ffthelper::U
+  ffthelper::V
   boris::ElectromagneticBoris
   dt::Float64
   rtol::Float64
@@ -431,14 +427,15 @@ struct LorenzGaugeSemiImplicitField{T, U} <: AbstractLorenzGaugeField
 end
 
 function LorenzGaugeSemiImplicitField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0,
-    imex::AbstractImEx=Explicit(), buffer=0, rtol=sqrt(eps()), maxiters=10)
+    fieldimex::AbstractImEx=Explicit(), sourceimex::AbstractImEx=Explicit(),
+    buffer=0, rtol=sqrt(eps()), maxiters=10)
   EBxyz = OffsetArray(zeros(6, NX+2buffer, NY+2buffer), 1:6, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer);
   gps = GridParameters(Lx, Ly, NX, NY)
   ffthelper = FFTHelper(NX, NY, Lx, Ly)
   boris = ElectromagneticBoris(dt)
   ρJs = OffsetArray(zeros(4, NX+2buffer, NY+2buffer, nthreads()),
     1:4, -(buffer-1):NX+buffer, -(buffer-1):NY+buffer, 1:nthreads());
-  return LorenzGaugeSemiImplicitField(imex, ρJs, deepcopy(ρJs), deepcopy(ρJs),
+  return LorenzGaugeSemiImplicitField(fieldimex, sourceimex, ρJs, deepcopy(ρJs), deepcopy(ρJs),
     deepcopy(ρJs), (zeros(ComplexF64, NX, NY) for _ in 1:30)..., EBxyz,
     Float64.((B0x, B0y, B0z)), gps, ffthelper, boris, dt, rtol, maxiters)
 end
@@ -590,11 +587,12 @@ function lorenzgauge!(imex::AbstractImEx, xⁿ⁺¹, xⁿ, xⁿ⁻¹, sⁿ, k²,
   end
 end
 
-function lorenzgauge!(imex::AbstractImEx, xⁿ⁺¹, xⁿ, xⁿ⁻¹, sⁿ⁺¹, sⁿ, sⁿ⁻¹, k², dt²)
-  θ = theta(imex)
+function lorenzgauge!(fieldimex::AbstractImEx, xⁿ⁺¹, xⁿ, xⁿ⁻¹, sⁿ⁺¹, sⁿ, sⁿ⁻¹, k², dt², sourceimex=fieldimex)
+  θ = theta(sourceimex)
   @threads for i in eachindex(xⁿ)
-    num = numerator(imex, dt², k²[i])
-    den = denominator(imex, dt², k²[i])
+    num = numerator(fieldimex, dt², k²[i])
+    den = denominator(fieldimex, dt², k²[i])
+    #xⁿ⁺¹[i] = (num * xⁿ[i] + dt² * (θ/2 * sⁿ⁻¹[i] + (1 - θ) * sⁿ[i] + θ/2 * sⁿ⁺¹[i])) / den - xⁿ⁻¹[i]
     xⁿ⁺¹[i] = (num * xⁿ[i] + dt² * (θ/2 * sⁿ⁻¹[i] + (1 - θ) * sⁿ[i] + θ/2 * sⁿ⁺¹[i])) / den - xⁿ⁻¹[i]
   end
 end
@@ -900,28 +898,19 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
   while true
     if (iters > 0) && (iters > field.maxiters || isapprox(field.ρJsᵗ, field.ρJs⁺, rtol=field.rtol, atol=0))
       for species in plasma
-        x = @view positions(species)[1, :]
-        y = @view positions(species)[2, :]
-        vx = @view velocities(species)[1, :]
-        vy = @view velocities(species)[2, :]
-        vz = @view velocities(species)[3, :]
-        xʷ = @view positions(species; work=true)[1, :]
-        yʷ = @view positions(species; work=true)[2, :]
-        vxʷ = @view velocities(species; work=true)[1, :]
-        vyʷ = @view velocities(species; work=true)[2, :]
-        vzʷ = @view velocities(species; work=true)[3, :]
-        x .= xʷ
-        y .= yʷ
-        vx .= vxʷ
-        vy .= vyʷ
-        vz .= vzʷ
+        x = positions(species)
+        v = velocities(species)
+        xʷ = positions(species; work=true)
+        vʷ = velocities(species; work=true)
+        @tturbo x .= xʷ
+        @tturbo v .= vʷ
       end
       break
     end
     iters += 1
     copyto!.(plasma, plasmacopy)
-    @turbo field.ρJsᵗ .= field.ρJs⁺
-    @turbo field.ρJs⁺ .= 0
+    @tturbo field.ρJsᵗ .= field.ρJs⁺
+    @tturbo field.ρJs⁺ .= 0
     @timeit to "Particle Loop" begin
       @threads for j in axes(field.ρJs⁺, 4)
         ρJ⁺ = @view field.ρJs⁺[:, :, :, j]
@@ -938,36 +927,15 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
           vxʷ = @view velocities(species; work=true)[1, :]
           vyʷ = @view velocities(species; work=true)[2, :]
           vzʷ = @view velocities(species; work=true)[3, :]
-          #  E.....E.....E
-          #  B.....B.....B
-          #  ϕ.....ϕ.....ϕ
-          #  -..A..0..A..+..A
-          #  ρ.....ρ.....ρ
-          #  -..J..0..J..+..J
-          #  x.....x.....x
-          #  -..v..0..v..+..v
           for i in species.chunks[j]
             Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
-            #vx0, vy0, vz0 = vx[i], vy[i], vz[i]
-            #vx⁻, vy⁻, vz⁻ = field.boris(vx0, vy0, vz0, Exi, Eyi, Ezi,
-            #  Bxi, Byi, Bzi, -q_m);
-            vx⁺, vy⁺, vz⁺ = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+            xʷ[i] = unimod(x[i] + vx[i] * dt, Lx)
+            yʷ[i] = unimod(y[i] + vy[i] * dt, Ly)
+            vxʷ[i], vyʷ[i], vzʷ[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
               Bxi, Byi, Bzi, q_m);
-            #x⁻ = unimod(x[i] - vx0 * dt, Lx)
-            #y⁻ = unimod(y[i] - vy0 * dt, Ly)
-            ## deposit J at the (n+1/2)th point
-            #deposit!(ρJ⁻, species.shape, x⁻, y⁻, NX_Lx, NY_Ly,
-            #  vx⁻ * qw_ΔV, vy⁻ * qw_ΔV, vz⁻ * qw_ΔV)
-            x⁺ = unimod(x[i] + vx[i] * dt, Lx)
-            y⁺ = unimod(y[i] + vy[i] * dt, Ly)
             # now deposit ρ at (n+1)th timestep
-            deposit!(ρJ⁺, species.shape, x⁺, y⁺, NX_Lx, NY_Ly,
-              vx⁺ * qw_ΔV, vy⁺ * qw_ΔV, vz⁺ * qw_ΔV)
-            xʷ[i] = x⁺
-            yʷ[i] = y⁺
-            vxʷ[i] = vx⁺
-            vyʷ[i] = vy⁺
-            vzʷ[i] = vz⁺
+            deposit!(ρJ⁺, species.shape, xʷ[i], yʷ[i], NX_Lx, NY_Ly,
+              vxʷ[i] * qw_ΔV, vyʷ[i] * qw_ΔV,  vzʷ[i] * qw_ΔV)
           end
         end
       end
@@ -981,34 +949,20 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
       field.ffthelper.pfft! * field.Jx⁺;
       field.ffthelper.pfft! * field.Jy⁺;
       field.ffthelper.pfft! * field.Jz⁺;
-    end
-    @timeit to "Field Solve" begin
       field.ρ⁺[1, 1] = 0
       field.Jx⁺[1, 1] = 0
       field.Jy⁺[1, 1] = 0
       field.Jz⁺[1, 1] = 0
-      # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
-      lorenzgauge!(field.imex, field.ϕ⁺, field.ϕ⁰,  field.ϕ⁻, field.ρ⁺, field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2)
-      lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁺, field.Jx⁰, field.Jx⁻, field.ffthelper.k², dt^2)
-      lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁺, field.Jy⁰, field.Jy⁻, field.ffthelper.k², dt^2)
-      lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁺, field.Jz⁰, field.Jz⁻, field.ffthelper.k², dt^2)
     end
-    # at this point (ϕ, Ai) stores the (n+1)th timestep value and (ϕ⁻, Ai⁻) the nth
-    # Now calculate the value of E and B at n+1/2
-    # Eʰ = -∇(ϕ⁰ + ϕ⁺) / 2 - (A⁺ - A⁰)/dt
-    # Bʰ = ∇x(A⁺ + A⁰)/2
-    # xʰ = (-x⁻ + 6x⁰ + 3x¹) / 8
-
-    #  E.....E.....E
-    #  B.....B.....B
-    #  ϕ.....ϕ.....ϕ
-    #  -..A..0..A..+..A
-    #  ρ.....ρ.....ρ
-    #  -..J..0..J..+..J
-    #  x.....x.....x
-    #  -..v..0..v..+..v
+    @timeit to "Field Solve" begin
+      # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
+      lorenzgauge!(field.fieldimex, field.ϕ⁺, field.ϕ⁰,  field.ϕ⁻, field.ρ⁺, field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2, field.sourceimex)
+      lorenzgauge!(field.fieldimex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁺, field.Jx⁰, field.Jx⁻, field.ffthelper.k², dt^2, field.sourceimex)
+      lorenzgauge!(field.fieldimex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁺, field.Jy⁰, field.Jy⁻, field.ffthelper.k², dt^2, field.sourceimex)
+      lorenzgauge!(field.fieldimex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁺, field.Jz⁰, field.Jz⁻, field.ffthelper.k², dt^2, field.sourceimex)
+    end
     @timeit to "Calculate E, B" begin
-      θ = theta(field.imex)
+      θ = theta(field.fieldimex)
       @. field.Ex = -im * field.ffthelper.kx * (θ/2 * (field.ϕ⁺ + field.ϕ⁻) + (1-θ)*field.ϕ⁰) 
       @. field.Ey = -im * field.ffthelper.ky * (θ/2 * (field.ϕ⁺ + field.ϕ⁻) + (1-θ)*field.ϕ⁰)
       @. field.Ex -= (field.Ax⁺ - field.Ax⁻)/2dt
@@ -1066,7 +1020,7 @@ bspline(::BSplineWeighting{@stat N}, x) where N = bspline(BSplineWeighting{Int(N
 @inline bspline(::BSplineWeighting{0}, x) = ((1.0),)
 @inline bspline(::BSplineWeighting{1}, x) = (x, 1-x)
 function bspline(::BSplineWeighting{2}, x)
-  @cse begin
+  @fastmath begin
     a = 9/8 + 3/2*(x-1.5) + 1/2*(x-1.5)^2
     b = 3/4               -     (x-0.5)^2
     c = 9/8 - 3/2*(x+0.5) + 1/2*(x+0.5)^2
@@ -1074,7 +1028,7 @@ function bspline(::BSplineWeighting{2}, x)
   return (a, b, c)
 end
 function bspline(::BSplineWeighting{3}, x)
-  @cse begin
+  @fastmath begin
     a = 4/3 + 2*(x-2) + (x-2)^2 + 1/6*(x-2)^3
     b = 2/3           - (x-1)^2 - 1/2*(x-1)^3
     c = 2/3           - (x  )^2 + 1/2*(x  )^3
@@ -1083,7 +1037,7 @@ function bspline(::BSplineWeighting{3}, x)
   return (a, b, c, d)
 end
 function bspline(::BSplineWeighting{4}, x)
-  @cse begin
+  @fastmath begin
     a = 625/384 + 125/48*(x-2.5) + 25/16*(x-2.5)^2 + 5/12*(x-2.5)^3 + 1/24*(x-2.5)^4
     b = 55/96   -   5/24*(x-1.5) -   5/4*(x-1.5)^2 -  5/6*(x-1.5)^3 -  1/6*(x-1.5)^4
     c = 115/192                  -   5/8*(x-0.5)^2                  +  1/4*(x-0.5)^4
@@ -1093,7 +1047,7 @@ function bspline(::BSplineWeighting{4}, x)
   return (a, b, c, d, e)
 end
 function bspline(::BSplineWeighting{5}, x)
-  @cse begin
+  @fastmath begin
   a = 243/120 + 81/24*(x-3) + 9/4*(x-3)^2 + 3/4*(x-3)^3 + 1/8*(x-3)^4 + 1/120*(x-3)^5
   b = 17/40   -   5/8*(x-2) - 7/4*(x-2)^2 - 5/4*(x-2)^3 - 3/8*(x-2)^4 -  1/24*(x-2)^5
   c = 22/40                 - 1/2*(x-1)^2               + 1/4*(x-1)^4 +  1/12*(x-1)^5
@@ -1106,14 +1060,23 @@ end
 
 @inline indices(::BSplineWeighting{N}, i) where N = (i-fld(N, 2)):(i+cld(N, 2))
 
+for N in 0:2:10
+  @eval _bsplineinputs(::BSplineWeighting{@stat $(N+1)}, i, centre, ) = (i, 1 - centre)
+  @eval function _bsplineinputs(::BSplineWeighting{@stat $N}, i, centre, )
+    q = centre > 0.5
+    return (i + q, q + 0.5 - centre)
+  end
+end
+
 @inline function gridinteractiontuple(s::BSplineWeighting{N}, i, centre::T, NZ
     ) where {N,T}
-  (j, z) = if isodd(N)
-    (i, 1 - centre)
-  else
-    q = centre > 0.5
-    (i + q, q + 0.5 - centre)
-  end
+#  (j, z) = if isodd(N)
+#    (i, 1 - centre)
+#  else
+#    q = centre > 0.5
+#    (i + q, q + 0.5 - centre)
+#  end
+  j, z = _bsplineinputs(s, i, centre)
   inds = indices(s, j)
   fractions = bspline(s, z)
   #@assert sum(fractions) ≈ 1 "$(sum(fractions)), $fractions"
@@ -1235,7 +1198,7 @@ function diagnose!(d::AbstractDiagnostics, plasma, to)
   @timeit to "Plasma" begin
     ti = d.ti[]
     d.kineticenergy[ti] = sum(kineticenergy(s) for s in plasma)
-    d.particlemomentum[ti] = sum(momentum(s) for s in plasma)
+    d.particlemomentum[ti] .= sum(momentum(s) for s in plasma)
   end
 end
 
@@ -1373,7 +1336,14 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
   plot!(ts, d.kineticenergy, label="Particles")
   plot!(ts, d.fieldenergy + d.kineticenergy, label="Total")
   savefig("Energies.png")
-  
+
+  fieldmom = cat(d.fieldmomentum..., dims=2)'
+  particlemom = cat(d.particlemomentum..., dims=2)'
+  plot(ts, fieldmom, label="Fields")
+  plot!(ts, particlemom, label="Particles")
+  plot!(ts, fieldmom .+ particlemom, label="Total")
+  savefig("Momenta.png")
+ 
   wind = findlast(ws .< max(cutoff, 6 * sqrt(n0)/w0));
   isnothing(wind) && (wind = length(ws)÷2)
   kxind = min(length(kxs)÷2-1, 128)
