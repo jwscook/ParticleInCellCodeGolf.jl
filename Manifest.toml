@@ -2,7 +2,7 @@
 
 julia_version = "1.8.5"
 manifest_format = "2.0"
-project_hash = "bbbe77f65ac5b174eee7c688e51fd2f2d75f2e22"
+project_hash = "4da14134f75a518c62dd56d653af472bf8c6e87b"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -81,6 +81,12 @@ deps = ["Artifacts", "Bzip2_jll", "CompilerSupportLibraries_jll", "Fontconfig_jl
 git-tree-sha1 = "4b859a208b2397a7a623a03449e4636bdb17bcf2"
 uuid = "83423d85-b0ee-5818-9007-b63ccbeb887a"
 version = "1.16.1+1"
+
+[[deps.Calculus]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "f641eb0a4f00c343bbc32346e1217b86f3ce9dad"
+uuid = "49dc2e85-a5d0-5ad3-a950-438e2897f1b9"
+version = "0.5.1"
 
 [[deps.ChainRulesCore]]
 deps = ["Compat", "LinearAlgebra", "SparseArrays"]
@@ -621,6 +627,12 @@ deps = ["Artifacts", "Libdl"]
 uuid = "c8ffd9c3-330d-5841-b78e-0817d7145fa1"
 version = "2.28.0+0"
 
+[[deps.Measurements]]
+deps = ["Calculus", "LinearAlgebra", "Printf", "RecipesBase", "Requires"]
+git-tree-sha1 = "12950d646ce04fb2e89ba5bd890205882c3592d7"
+uuid = "eff96d63-e80a-5855-80a2-b1b0885c5ab7"
+version = "2.8.0"
+
 [[deps.Measures]]
 git-tree-sha1 = "c13304c81eec1ed3af7fc20e75fb6b26092a1102"
 uuid = "442fdcdd-2543-5da2-b0f3-8c86c306513e"
@@ -715,6 +727,12 @@ deps = ["Dates", "SnoopPrecompile"]
 git-tree-sha1 = "6466e524967496866901a78fca3f2e9ea445a559"
 uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
 version = "2.5.2"
+
+[[deps.PhysicalConstants]]
+deps = ["Measurements", "Roots", "Unitful"]
+git-tree-sha1 = "cd4da9d1890bc2204b08fe95ebafa55e9366ae4e"
+uuid = "5ad8b20f-a522-5ce9-bfc9-ddf1d5bda6ab"
+version = "0.2.3"
 
 [[deps.Pipe]]
 git-tree-sha1 = "6842804e7867b115ca9de748a0cf6b364523c16d"
@@ -1000,6 +1018,12 @@ version = "0.1.1"
 deps = ["InteractiveUtils", "Logging", "Random", "Serialization"]
 uuid = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
+[[deps.ThreadPinning]]
+deps = ["DelimitedFiles", "Libdl", "LinearAlgebra", "Preferences", "Random", "SnoopPrecompile"]
+git-tree-sha1 = "0240eee54b2367557bbbfc026f3d61e5e690fe70"
+uuid = "811555cd-349b-4f26-b7bc-1f208b848042"
+version = "0.7.2"
+
 [[deps.ThreadingUtilities]]
 deps = ["ManualMemory"]
 git-tree-sha1 = "884539ba8c4584a3a8173cb4ee7b61049955b79c"
@@ -1052,6 +1076,12 @@ deps = ["REPL"]
 git-tree-sha1 = "53915e50200959667e78a92a418594b428dffddf"
 uuid = "1cfade01-22cf-5700-b092-accc4b62d6e1"
 version = "0.4.1"
+
+[[deps.Unitful]]
+deps = ["ConstructionBase", "Dates", "LinearAlgebra", "Random"]
+git-tree-sha1 = "d3f95a76c89777990d3d968ded5ecf12f9a0ad72"
+uuid = "1986cc42-f94f-5a68-af5c-568840ba703d"
+version = "1.12.3"
 
 [[deps.Unzip]]
 git-tree-sha1 = "ca0969166a028236229f63514992fc073799bb78"

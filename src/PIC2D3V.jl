@@ -12,7 +12,7 @@ function applyperiodicity!(a::Array, oa)
   @assert length(size(a)) == 2
   @assert length(size(oa)) == 2
   for j in axes(oa, 2), i in axes(oa, 1)
-    a[unimod(i, NX), unimod(j, NY)] += oa[i, j]
+    a[mod1(i, NX), mod1(j, NY)] += oa[i, j]
   end
 end
 
@@ -21,7 +21,7 @@ function applyperiodicity!(oa, a::Array)
   @assert length(size(a)) == 2
   @assert length(size(oa)) == 2
   for j in axes(oa, 2), i in axes(oa, 1)
-     oa[i, j] += real(a[unimod(i, NX), unimod(j, NY)])
+     oa[i, j] += real(a[mod1(i, NX), mod1(j, NY)])
   end
 end
 
@@ -162,7 +162,7 @@ xyvchunk(s::Species, i::Int) = @view s.xyv[:, s.chunks[i]]
 
 function copyto!(dest::Species, src::Species)
   @tturbo dest.xyv .= src.xyv
-  @tturbo dest.p .= src.p
+  #@tturbo dest.p .= src.p
   return dest
 end
 
@@ -271,8 +271,9 @@ function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0, buff
 end
 
 function update!(f::ElectrostaticField)
-  applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
-  applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
+  t1 = @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
+  t2 = @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
+  wait(t1); wait(t2)
 end
 
 abstract type AbstractImEx end
@@ -446,58 +447,85 @@ theta(::Implicit) = 1
 
 function update!(f::AbstractLorenzGaugeField)
   f.EBxyz .= 0.0
-  applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
-  applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
-  applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
-  applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
-  applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
-  applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
-  @views for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
+  t1 = @spawn applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+  t2 = @spawn applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+  t3 = @spawn applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+  t4 = @spawn applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+  t5 = @spawn applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+  t6 = @spawn applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+  wait(t4); wait(t5); wait(t6);
+  @inbounds for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
     f.EBxyz[i+3, j, k] += f.B0[i]
   end
+  wait(t1); wait(t2); wait(t3);
+#  applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+#  applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+#  applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+#  applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+#  applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+#  applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+#  @inbounds for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
+#    f.EBxyz[i+3, j, k] += f.B0[i]
+#  end
 end
 
 function reduction!(a, z)
   @. a = 0.0
-  @views for k in axes(z, 3)
-    applyperiodicity!(a, z[:, :, k])
+  @inbounds for k in axes(z, 3)
+    applyperiodicity!(a, (@view z[:, :, k]))
   end
 end
 
 function reduction!(a, b, c, z)
   @assert size(z, 1) == 4
-  @. a = 0.0
-  @. b = 0.0
-  @. c = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(a, z[1, :, :, k])
+  task1 = @spawn begin
+    @. a = 0.0
+    @views for k in axes(z, 4)
+      applyperiodicity!(a, z[1, :, :, k])
+    end
   end
-  @views for k in axes(z, 4)
-    applyperiodicity!(b, z[2, :, :, k])
+  task2 = @spawn begin
+    @. b = 0.0
+    @views for k in axes(z, 4)
+      applyperiodicity!(b, z[2, :, :, k])
+    end
   end
-  @views for k in axes(z, 4)
-    applyperiodicity!(c, z[3, :, :, k])
+  task3 = @spawn begin
+    @. c = 0.0
+    @views for k in axes(z, 4)
+      applyperiodicity!(c, z[3, :, :, k])
+    end
   end
+  wait.(vcat(task1, task2, task3))
 end
 
 function reduction!(a, b, c, d, z)
   @assert size(z, 1) == 4
-  @. a = 0.0
-  @. b = 0.0
+  task1 = @spawn begin
+    @. a = 0.0
+    @views for k in axes(z, 4)
+      applyperiodicity!(a, z[1, :, :, k])
+    end
+  end
+  task2 = @spawn begin
+    @. b = 0.0
+    @views for k in axes(z, 4)
+      applyperiodicity!(b, z[2, :, :, k])
+    end
+  end
+  task3 = @spawn begin
   @. c = 0.0
-  @. d = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(a, z[1, :, :, k])
-  end
-  @views for k in axes(z, 4)
-    applyperiodicity!(b, z[2, :, :, k])
-  end
   @views for k in axes(z, 4)
     applyperiodicity!(c, z[3, :, :, k])
   end
-  @views for k in axes(z, 4)
-    applyperiodicity!(d, z[4, :, :, k])
   end
+  task4 = @spawn begin
+    @. d = 0.0
+    @views for k in axes(z, 4)
+     applyperiodicity!(d, z[4, :, :, k])
+    end
+  end
+  wait.(vcat(task1, task2, task3, task4))
 end
 
 # E = -∇ ϕ
@@ -896,7 +924,8 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
   firstloop = true
   iters = 0
   while true
-    if (iters > 0) && (iters > field.maxiters || isapprox(field.ρJsᵗ, field.ρJs⁺, rtol=field.rtol, atol=0))
+    if (iters > 0) && (iters > field.maxiters ||
+        isapprox(sum(abs2, field.ρJsᵗ), sum(abs2, field.ρJs⁺), rtol=field.rtol, atol=0))
       for species in plasma
         x = positions(species)
         v = velocities(species)
@@ -917,25 +946,40 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
         for species in plasma
           qw_ΔV = species.charge * species.weight / ΔV
           q_m = species.charge / species.mass
-          x = @view positions(species)[1, :]
-          y = @view positions(species)[2, :]
-          vx = @view velocities(species)[1, :]
-          vy = @view velocities(species)[2, :]
-          vz = @view velocities(species)[3, :]
-          xʷ = @view positions(species; work=true)[1, :]
-          yʷ = @view positions(species; work=true)[2, :]
-          vxʷ = @view velocities(species; work=true)[1, :]
-          vyʷ = @view velocities(species; work=true)[2, :]
-          vzʷ = @view velocities(species; work=true)[3, :]
+          #x = @view positions(species)[1, :]
+          #y = @view positions(species)[2, :]
+          #vx = @view velocities(species)[1, :]
+          #vy = @view velocities(species)[2, :]
+          #vz = @view velocities(species)[3, :]
+          #xʷ = @view positions(species; work=true)[1, :]
+          #yʷ = @view positions(species; work=true)[2, :]
+          #vxʷ = @view velocities(species; work=true)[1, :]
+          #vyʷ = @view velocities(species; work=true)[2, :]
+          #vzʷ = @view velocities(species; work=true)[3, :]
+
+
+          xy = positions(species)
+          vxyz = velocities(species)
+          xyʷ = positions(species; work=true)
+          vxyzʷ = velocities(species; work=true)
           for i in species.chunks[j]
-            Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
-            xʷ[i] = unimod(x[i] + vx[i] * dt, Lx)
-            yʷ[i] = unimod(y[i] + vy[i] * dt, Ly)
-            vxʷ[i], vyʷ[i], vzʷ[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
-              Bxi, Byi, Bzi, q_m);
+#            Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
+#            xʷ[i] = unimod(x[i] + vx[i] * dt, Lx)
+#            yʷ[i] = unimod(y[i] + vy[i] * dt, Ly)
+#            vxʷ[i], vyʷ[i], vzʷ[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
+#              Bxi, Byi, Bzi, q_m);
+#            # now deposit ρ at (n+1)th timestep
+#            deposit!(ρJ⁺, species.shape, xʷ[i], yʷ[i], NX_Lx, NY_Ly,
+#              vxʷ[i] * qw_ΔV, vyʷ[i] * qw_ΔV,  vzʷ[i] * qw_ΔV)
+            Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, xy[1, i], xy[2, i])
+            xyʷ[1, i] = unimod(xy[1, i] + vxyz[1, i] * dt, Lx)
+            xyʷ[2, i] = unimod(xy[2, i] + vxyz[2, i] * dt, Ly)
+            vxyzʷ[1, i], vxyzʷ[2, i], vxyzʷ[3, i] = field.boris(
+              vxyz[1, i], vxyz[2, i], vxyz[3, i], Exi, Eyi, Ezi, Bxi, Byi, Bzi, q_m);
             # now deposit ρ at (n+1)th timestep
-            deposit!(ρJ⁺, species.shape, xʷ[i], yʷ[i], NX_Lx, NY_Ly,
-              vxʷ[i] * qw_ΔV, vyʷ[i] * qw_ΔV,  vzʷ[i] * qw_ΔV)
+            deposit!(ρJ⁺, species.shape, xyʷ[1, i], xyʷ[2, i], NX_Lx, NY_Ly,
+              vxyzʷ[1, i] * qw_ΔV, vxyzʷ[2, i] * qw_ΔV,  vxyzʷ[3, i] * qw_ΔV)
+
           end
         end
       end
