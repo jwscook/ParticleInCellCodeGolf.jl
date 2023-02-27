@@ -11,7 +11,7 @@ function applyperiodicity!(a::Array, oa)
   NX, NY = size(a)
   @assert length(size(a)) == 2
   @assert length(size(oa)) == 2
-  for j in axes(oa, 2), i in axes(oa, 1)
+  @inbounds for j in axes(oa, 2), i in axes(oa, 1)
     a[mod1(i, NX), mod1(j, NY)] += oa[i, j]
   end
 end
@@ -20,7 +20,7 @@ function applyperiodicity!(oa, a::Array)
   NX, NY = size(a)
   @assert length(size(a)) == 2
   @assert length(size(oa)) == 2
-  for j in axes(oa, 2), i in axes(oa, 1)
+  @inbounds for j in axes(oa, 2), i in axes(oa, 1)
      oa[i, j] += real(a[mod1(i, NX), mod1(j, NY)])
   end
 end
@@ -46,7 +46,8 @@ function ElectrostaticBoris(B::AbstractVector, dt::Float64)
   return ElectrostaticBoris(t, t², dt / 2)
 end
 function (boris::ElectrostaticBoris)(vx, vy, vz, Ex, Ey, q_m)
-  Ē₂ = (@SArray [Ex, Ey, 0.0]) * boris.dt_2 * q_m
+  dtq_2m = boris.dt_2 * q_m
+  Ē₂ = (@SArray [Ex * dtq_2m, Ey * dtq_2m, 0.0])
   v⁻ = (@SArray [vx, vy, vz]) + Ē₂
   v⁺ = v⁻ + cross(v⁻ + cross(v⁻, boris.t), boris.t) * q_m^2 * 2 / (1 + q_m^2 * boris.t²)
   return v⁺ + Ē₂
@@ -161,7 +162,7 @@ end
 xyvchunk(s::Species, i::Int) = @view s.xyv[:, s.chunks[i]]
 
 function copyto!(dest::Species, src::Species)
-  @tturbo dest.xyv .= src.xyv
+  @turbo dest.xyv .= src.xyv
   #@tturbo dest.p .= src.p
   return dest
 end
@@ -247,12 +248,10 @@ end
 
 
 struct ElectrostaticField{T} <: AbstractField
-#  ρs::Array{Float64, 3}
   ρs::OffsetArray{Float64, 3, Array{Float64, 3}}# Array{Float64, 3} # offset array
   ϕ::Array{ComplexF64, 2}
   Ex::Array{ComplexF64, 2}
   Ey::Array{ComplexF64, 2}
-#  Exy::Array{Float64, 3}
   Exy::OffsetArray{Float64, 3, Array{Float64, 3}}#Array{Float64, 3} # offset array
   B0::NTuple{3, Float64}
   gridparams::GridParameters
@@ -271,8 +270,10 @@ function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0, buff
 end
 
 function update!(f::ElectrostaticField)
+  #@sync begin
   t1 = @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
   t2 = @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
+  #end
   wait(t1); wait(t2)
 end
 
@@ -478,6 +479,7 @@ end
 
 function reduction!(a, b, c, z)
   @assert size(z, 1) == 4
+  #@sync begin
   task1 = @spawn begin
     @. a = 0.0
     @views for k in axes(z, 4)
@@ -496,11 +498,13 @@ function reduction!(a, b, c, z)
       applyperiodicity!(c, z[3, :, :, k])
     end
   end
+  #end
   wait.(vcat(task1, task2, task3))
 end
 
 function reduction!(a, b, c, d, z)
   @assert size(z, 1) == 4
+#@sync begin
   task1 = @spawn begin
     @. a = 0.0
     @views for k in axes(z, 4)
@@ -525,6 +529,7 @@ function reduction!(a, b, c, d, z)
      applyperiodicity!(d, z[4, :, :, k])
     end
   end
+#end
   wait.(vcat(task1, task2, task3, task4))
 end
 
@@ -931,15 +936,15 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
         v = velocities(species)
         xʷ = positions(species; work=true)
         vʷ = velocities(species; work=true)
-        @tturbo x .= xʷ
-        @tturbo v .= vʷ
+        @turbo x .= xʷ
+        @turbo v .= vʷ
       end
       break
     end
     iters += 1
     copyto!.(plasma, plasmacopy)
-    @tturbo field.ρJsᵗ .= field.ρJs⁺
-    @tturbo field.ρJs⁺ .= 0
+    @turbo field.ρJsᵗ .= field.ρJs⁺
+    @turbo field.ρJs⁺ .= 0
     @timeit to "Particle Loop" begin
       @threads for j in axes(field.ρJs⁺, 4)
         ρJ⁺ = @view field.ρJs⁺[:, :, :, j]
@@ -957,12 +962,11 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
           #vyʷ = @view velocities(species; work=true)[2, :]
           #vzʷ = @view velocities(species; work=true)[3, :]
 
-
           xy = positions(species)
           vxyz = velocities(species)
           xyʷ = positions(species; work=true)
           vxyzʷ = velocities(species; work=true)
-          for i in species.chunks[j]
+          @inbounds for i in species.chunks[j]
 #            Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
 #            xʷ[i] = unimod(x[i] + vx[i] * dt, Lx)
 #            yʷ[i] = unimod(y[i] + vy[i] * dt, Ly)
@@ -976,9 +980,9 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
             xyʷ[2, i] = unimod(xy[2, i] + vxyz[2, i] * dt, Ly)
             vxyzʷ[1, i], vxyzʷ[2, i], vxyzʷ[3, i] = field.boris(
               vxyz[1, i], vxyz[2, i], vxyz[3, i], Exi, Eyi, Ezi, Bxi, Byi, Bzi, q_m);
-            # now deposit ρ at (n+1)th timestep
+            # now deposit ρ, J at prospective (n+1)th timestep
             deposit!(ρJ⁺, species.shape, xyʷ[1, i], xyʷ[2, i], NX_Lx, NY_Ly,
-              vxyzʷ[1, i] * qw_ΔV, vxyzʷ[2, i] * qw_ΔV,  vxyzʷ[3, i] * qw_ΔV)
+              qw_ΔV, vxyzʷ[1, i] * qw_ΔV, vxyzʷ[2, i] * qw_ΔV,  vxyzʷ[3, i] * qw_ΔV)
 
           end
         end
@@ -1196,6 +1200,7 @@ function deposit!(z::AbstractArray{<:Number, 2}, s::AbstractShape, x, y, NX_Lx, 
 end
 
 function deposit!(z::AbstractArray{<:Number, 3}, s::AbstractShape, x, y, NX_Lx, NY_Ly, w1)
+#  deposit!(z, s, x, y, NX_Lx, NY_Ly, 1:1, (w1, ))
   NV, NX, NY = size(z)
   @assert NV == 4
   for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
@@ -1210,6 +1215,7 @@ function deposit!(z::AbstractArray{<:Number, 3}, s::AbstractShape, x, y, NX_Lx, 
 end
 
 function deposit!(z::AbstractArray{<:Number, 3}, s::AbstractShape, x, y, NX_Lx, NY_Ly, w2, w3, w4)
+#  deposit!(z, s, x, y, NX_Lx, NY_Ly, 2:4, (0, w2, w3, w4))
   NV, NX, NY = size(z)
   @assert NV == 4
   for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
@@ -1224,6 +1230,7 @@ function deposit!(z::AbstractArray{<:Number, 3}, s::AbstractShape, x, y, NX_Lx, 
 end
 
 function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, w1, w2, w3, w4)
+  #deposit!(z, s, x, y, NX_Lx, NY_Ly, 1:4, (w1, w2, w3, w4))
   NV, NX, NY = size(z)
   @assert NV == 4
   for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
@@ -1236,6 +1243,19 @@ function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, w1, w2, w3, w4)
     end
   end
 end
+#function deposit!(z, s::AbstractShape, x, y, NX_Lx, NY_Ly, hs::UnitRange, ws::Tuple)
+#  NV, NX, NY = size(z)
+#  @assert NV == 4
+#  for (j, wy) in depositindicesfractions(s, y, NY, NY_Ly)
+#    for (i, wx) in depositindicesfractions(s, x, NX, NX_Lx)
+#      wxy = wx * wy
+#      for h in hs
+#        wsh = ws[h]
+#        @inbounds @muladd z[h,i,j] = z[h,i,j] + wxy * wsh
+#      end
+#    end
+#  end
+#end
 
 
 function diagnose!(d::AbstractDiagnostics, plasma, to)
@@ -1280,8 +1300,10 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::AbstractLorenzGaugeField, plasm
       if t % d.ntskip == 0
         @timeit to "Energy" begin
           d.fieldenergy[ti] = mean(abs2, f.EBxyz) / 2
+          ndiag = length(d.kineticenergy)
           totenergy = (d.fieldenergy[ti] + d.kineticenergy[ti]) / (d.fieldenergy[1] + d.kineticenergy[1])
-          @show ti, totenergy
+          ndiag = length(d.kineticenergy)
+          @show ndiag, d.ti, totenergy
         end
         @timeit to "Momentum" begin
           px, py, pz = 0.0, 0.0, 0.0
@@ -1388,7 +1410,7 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
   plot!(ts, fieldmom .+ particlemom, label="Total")
   savefig("Momenta.png")
  
-  wind = findlast(ws .< max(cutoff, 6 * sqrt(n0)/w0));
+  wind = findlast(ws .< min(cutoff, 6 * sqrt(n0)/w0));
   isnothing(wind) && (wind = length(ws)÷2)
   kxind = min(length(kxs)÷2-1, 128)
   kyind = min(length(kys)÷2-1, 128)
@@ -1407,15 +1429,15 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
       gif(anim, "PIC2D3V_$(FS)_XY.gif", fps=10)
     end
 
-#    heatmap(xs, ys, F[:, :, 1])
-#    xlabel!(L"Position x $[v_{th} / \Omega]$");
-#    ylabel!(L"Position y $[v_{th} / \Omega]$")
-#    savefig("PIC2D3V_$(FS)_XY_ic.png")
-#
-#    heatmap(xs, ys, F[:, :, end])
-#    xlabel!(L"Position x $[v_{th} / \Omega]$");
-#    ylabel!(L"Position y $[v_{th} / \Omega]$")
-#    savefig("PIC2D3V_$(FS)_XY_final.png")
+    heatmap(xs, ys, F[:, :, 1])
+    xlabel!(L"Position x $[v_{th} / \Omega]$");
+    ylabel!(L"Position y $[v_{th} / \Omega]$")
+    savefig("PIC2D3V_$(FS)_XY_ic.png")
+
+    heatmap(xs, ys, F[:, :, end])
+    xlabel!(L"Position x $[v_{th} / \Omega]$");
+    ylabel!(L"Position y $[v_{th} / \Omega]$")
+    savefig("PIC2D3V_$(FS)_XY_final.png")
 
     Z = log10.(abs.(fft(F)[2:kxind, 1, 1:wind]))'
     heatmap(kxs[2:kxind], ws[1:wind], Z)
