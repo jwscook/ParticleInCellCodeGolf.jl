@@ -27,42 +27,37 @@ function pic()
   to = TimerOutput()
 
   #@timeit to "Initialisation" begin
+    L = 1.0
     debyeoverresolution = 1
     #vth = debyeoverresolution * dl * sqrt(n0)
-    vthe = 0.001 # 10 keV is 0.1
-    N_kres = 8
+    vthe = 0.1 # 10 keV is 0.1
+    N_kres = 4
     mi = 16
-    #NG = nextpow(2, 2π * sqrt(mi) * N_kres / vthe)
-    #n0 = NG^2 * vthe^2
-    n0 = 1.0
+    n0 = (2π* N_kres)^2 * mi 
     NG = nextpow(2, sqrt(n0) / vthe)
-    L = N_kres * 2π / sqrt(n0/mi)
     B0 = sqrt(n0) * 2 / 3; # 2T at 1e20m^-3
-    @show NG, n0, B0, L
     NGT = 256^2
     NY = NG
     NX = NGT ÷ NY
-    Ly = 1.0
-    Lx = Ly * NX / NY
+    Lx = 1.0
+    Ly = Lx * NY / NX
+    @show NG, NX, NY, n0, B0, L
     P = NX * NY * 2^4
-    NT = 2^18#2^14
+    NT = 2^15
     dl = min(Lx / NX, Ly / NY)
-    @show dl, 2pi/sqrt(n0)
-    #ntskip = 4
     #dt = dl/6vth
     #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
     #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
-    ntskip = 64#prevpow(2, round(Int, 10 / 6vthe)) ÷ 4
-    dt = dl/2 #/6vthe
+    dt = dl/3 #/6vthe
+    ntskip = prevpow(2, round(Int, (2π*mi/B0/4) / dt))
+    #ntskip = 4
     @show dt * vthe / dl
-    #field = PIC2D3V.LorenzGaugeField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-    #  imex=PIC2D3V.ImEx(1), buffer=10)
     field = PIC2D3V.LorenzGaugeStaggeredField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-      imex=PIC2D3V.ImEx(1), buffer=5)
+      imex=PIC2D3V.ImEx(0), buffer=5)
     #field = PIC2D3V.LorenzGaugeSemiImplicitField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
     #  fieldimex=PIC2D3V.ImEx(1.0), sourceimex=PIC2D3V.ImEx(0.05), buffer=10, rtol=sqrt(eps()), maxiters=100)
     diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 2; makegifs=false)
-    shape = PIC2D3V.BSplineWeighting{@stat 0}()
+    shape = PIC2D3V.BSplineWeighting{@stat 4}()
     #shape = PIC2D3V.NGPWeighting();#
     #shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vthe, n0, shape;
@@ -88,9 +83,9 @@ function pic()
 
   show(to)
 
-  return diagnostics, field, plasma, n0, vthe, NT
+  return diagnostics, field, plasma, n0, 1.0, NT
 end
 diagnostics, field, plasma, n0, vcharacteristic, NT = pic()
 
-PIC2D3V.plotfields(diagnostics, field, n0, vcharacteristic, NT; cutoff=1.0)
+PIC2D3V.plotfields(diagnostics, field, n0, vcharacteristic, NT; cutoff=1/16)
 
