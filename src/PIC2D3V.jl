@@ -50,8 +50,8 @@ function ElectrostaticBoris(B::AbstractVector, dt::Float64)
   return ElectrostaticBoris(t, t², dt / 2)
 end
 function (boris::ElectrostaticBoris)(vx, vy, vz, _, Ex, Ey, q_m)
-  dtq_2m = boris.dt_2 * q_m
-  Ē₂ = (@SArray [Ex * dtq_2m, Ey * dtq_2m, 0.0])
+  θ = boris.dt_2 * q_m
+  Ē₂ = (@SArray [Ex * θ, Ey * θ, 0.0])
   v⁻ = (@SArray [vx, vy, vz]) + Ē₂
   v⁺ = v⁻ + cross(v⁻ + cross(v⁻, boris.t), boris.t) * q_m^2 * 2 / (1 + q_m^2 * boris.t²)
   v = v⁺ + Ē₂
@@ -276,7 +276,7 @@ end
 
 
 #struct ElectrostaticField{N, A<:AbstractArray{Float64, N}, T} <: AbstractField
-struct ElectrostaticField{N, A<:AbstractArray{Float64, N}, T} <: AbstractField
+struct ElectrostaticField{T} <: AbstractField
   Exy::OffsetArray{Float64, 3, Array{Float64, 3}} # offset array
   ρs::OffsetArray{Float64, 3, Array{Float64, 3}} # offset array
   ϕ::Array{ComplexF64, 2}
@@ -299,11 +299,12 @@ function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0, buff
 end
 
 function update!(f::ElectrostaticField)
+  applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
+  applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
   #@sync begin
-  t1 = @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
-  t2 = @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
+  #  @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
+  #  @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
   #end
-  wait(t1); wait(t2)
 end
 
 abstract type AbstractImEx end
@@ -533,10 +534,9 @@ function particleloop!(plasma, field::ElectrostaticField, dt)
       γ = gammas(species)
       for i in species.chunks[k]
         Exi, Eyi = field(species.shape, x[i], y[i])
-        vxi, vyi = vx[i], vy[i]
         vx[i], vy[i], vz[i], γ[i] = field.boris(vx[i], vy[i], vz[i], γ[i], Exi, Eyi, q_m);
-        x[i] = unimod(x[i] + (vxi + vx[i])/2*dt, Lx)
-        y[i] = unimod(y[i] + (vyi + vy[i])/2*dt, Ly)
+        x[i] = unimod(x[i] + vx[i]*dt, Lx)
+        y[i] = unimod(y[i] + vy[i]*dt, Ly)
         deposit!(ρ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
       end
     end
@@ -1119,6 +1119,9 @@ function diagnose!(d::ElectrostaticDiagnostics, f::ElectrostaticField, plasma,
       ti = d.ti[]
       if t % d.ntskip == 0
         d.fieldenergy[ti] = mean(abs2, f.Exy) / 2
+        ndiag = length(d.kineticenergy)
+        totenergy = (d.fieldenergy[ti] + d.kineticenergy[ti]) / (d.fieldenergy[1] + d.kineticenergy[1])
+        @show ndiag, d.ti, totenergy
       end
       a = 1:d.ngskip:size(f.Ex, 1)
       b = 1:d.ngskip:size(f.Ex, 2)
@@ -1198,10 +1201,10 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::AbstractLorenzGaugeField, plasm
         f.ffthelper.pfft! * f.Ay⁺
         f.ffthelper.pfft! * f.Az⁺
         f.ffthelper.pfft! * f.ϕ⁺
-        #f.ffthelper.pfft! * f.ρ⁺; # not necessary to transform back - they're overwritten
-        #f.ffthelper.pfft! * f.Jx⁺;
-        #f.ffthelper.pfft! * f.Jy⁺;
-        #f.ffthelper.pfft! * f.Jz⁺;
+        f.ffthelper.pfft! * f.ρ⁺; # not necessary to transform back - they're overwritten
+        f.ffthelper.pfft! * f.Jx⁺;
+        f.ffthelper.pfft! * f.Jy⁺;
+        f.ffthelper.pfft! * f.Jz⁺;
       end
     end
   end
