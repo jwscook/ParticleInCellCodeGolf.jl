@@ -300,10 +300,11 @@ end
 
 function update!(f::ElectrostaticField)
   #@sync begin
-  t1 = @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
-  t2 = @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
+  #  @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
+  #  @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
   #end
-  wait(t1); wait(t2)
+  applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
+  applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
 end
 
 abstract type AbstractImEx end
@@ -440,17 +441,26 @@ theta(::Implicit) = 1
 
 function update!(f::AbstractLorenzGaugeField)
   f.EBxyz .= 0.0
-  t1 = @spawn applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
-  t2 = @spawn applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
-  t3 = @spawn applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
-  t4 = @spawn applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
-  t5 = @spawn applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
-  t6 = @spawn applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
-  wait(t4); wait(t5); wait(t6);
+  #t1 = @spawn applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+  #t2 = @spawn applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+  #t3 = @spawn applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+  #t4 = @spawn applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+  #t5 = @spawn applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+  #t6 = @spawn applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+  #wait(t4); wait(t5); wait(t6);
+  #@inbounds for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
+  #  f.EBxyz[i+3, j, k] += f.B0[i]
+  #end
+  #wait(t1); wait(t2); wait(t3);
+  applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+  applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+  applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+  applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+  applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+  applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
   @inbounds for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
     f.EBxyz[i+3, j, k] += f.B0[i]
   end
-  wait(t1); wait(t2); wait(t3);
 end
 
 function reduction!(a, z)
@@ -463,57 +473,84 @@ end
 function reduction!(a, b, c, z)
   @assert size(z, 1) == 4
   #@sync begin
-  task1 = @spawn begin
-    @. a = 0.0
-    @views for k in axes(z, 4)
-      applyperiodicity!(a, z[1, :, :, k])
-    end
-  end
-  task2 = @spawn begin
-    @. b = 0.0
-    @views for k in axes(z, 4)
-      applyperiodicity!(b, z[2, :, :, k])
-    end
-  end
-  task3 = @spawn begin
-    @. c = 0.0
-    @views for k in axes(z, 4)
-      applyperiodicity!(c, z[3, :, :, k])
-    end
-  end
+  #  @spawn begin
+  #    @. a = 0.0
+  #    @views for k in axes(z, 4)
+  #      applyperiodicity!(a, z[1, :, :, k])
+  #    end
+  #  end
+  #  @spawn begin
+  #    @. b = 0.0
+  #    @views for k in axes(z, 4)
+  #      applyperiodicity!(b, z[2, :, :, k])
+  #    end
+  #  end
+  #  @spawn begin
+  #    @. c = 0.0
+  #    @views for k in axes(z, 4)
+  #      applyperiodicity!(c, z[3, :, :, k])
+  #    end
+  #  end
   #end
-  wait.(vcat(task1, task2, task3))
+  @. a = 0.0
+  @views for k in axes(z, 4)
+    applyperiodicity!(a, z[1, :, :, k])
+  end
+  @. b = 0.0
+  @views for k in axes(z, 4)
+    applyperiodicity!(b, z[2, :, :, k])
+  end
+  @. c = 0.0
+  @views for k in axes(z, 4)
+    applyperiodicity!(c, z[3, :, :, k])
+  end
+
 end
 
 function reduction!(a, b, c, d, z)
   @assert size(z, 1) == 4
 #@sync begin
-  task1 = @spawn begin
-    @. a = 0.0
-    @views for k in axes(z, 4)
-      applyperiodicity!(a, z[1, :, :, k])
-    end
+#  @spawn begin
+#    @. a = 0.0
+#    @views for k in axes(z, 4)
+#      applyperiodicity!(a, z[1, :, :, k])
+#    end
+#  end
+#  @spawn begin
+#    @. b = 0.0
+#    @views for k in axes(z, 4)
+#      applyperiodicity!(b, z[2, :, :, k])
+#    end
+#  end
+#  @spawn begin
+#  @. c = 0.0
+#  @views for k in axes(z, 4)
+#    applyperiodicity!(c, z[3, :, :, k])
+#  end
+#  end
+#  @spawn begin
+#    @. d = 0.0
+#    @views for k in axes(z, 4)
+#     applyperiodicity!(d, z[4, :, :, k])
+#    end
+#  end
+#end
+  @. a = 0.0
+  @views for k in axes(z, 4)
+    applyperiodicity!(a, z[1, :, :, k])
   end
-  task2 = @spawn begin
-    @. b = 0.0
-    @views for k in axes(z, 4)
-      applyperiodicity!(b, z[2, :, :, k])
-    end
+  @. b = 0.0
+  @views for k in axes(z, 4)
+    applyperiodicity!(b, z[2, :, :, k])
   end
-  task3 = @spawn begin
   @. c = 0.0
   @views for k in axes(z, 4)
     applyperiodicity!(c, z[3, :, :, k])
   end
+  @. d = 0.0
+  @views for k in axes(z, 4)
+    applyperiodicity!(d, z[3, :, :, k])
   end
-  task4 = @spawn begin
-    @. d = 0.0
-    @views for k in axes(z, 4)
-     applyperiodicity!(d, z[4, :, :, k])
-    end
-  end
-#end
-  wait.(vcat(task1, task2, task3, task4))
 end
 
 function particleloop!(plasma, field::ElectrostaticField, dt)
@@ -730,10 +767,10 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   end
   @timeit to "Field Solve" begin
     # at this point ϕ stores the nth timestep value and ϕ⁻ the (n-1)th
-    lorenzgauge!(field.imex, field.ϕ⁺,  field.ϕ⁰,  field.ϕ⁻,  field.ρ⁺,  field.ρ⁰, field.ρ⁻, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁺, field.Jx⁰, field.Jx⁻, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁺, field.Jy⁰, field.Jy⁻, field.ffthelper.k², dt^2)
-    lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁺, field.Jz⁰, field.Jz⁻, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.ϕ⁺,  field.ϕ⁰,  field.ϕ⁻,  field.ρ⁰, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ax⁺, field.Ax⁰, field.Ax⁻, field.Jx⁰, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Ay⁺, field.Ay⁰, field.Ay⁻, field.Jy⁰, field.ffthelper.k², dt^2)
+    lorenzgauge!(field.imex, field.Az⁺, field.Az⁰, field.Az⁻, field.Jz⁰, field.ffthelper.k², dt^2)
   end
   # at this point (ϕ, Ai) stores the (n+1)th timestep value and (ϕ⁻, Ai⁻) the nth
   # Now calculate the value of E and B at n+1/2
@@ -1198,10 +1235,10 @@ function diagnose!(d::LorenzGaugeDiagnostics, f::AbstractLorenzGaugeField, plasm
         f.ffthelper.pfft! * f.Ay⁺
         f.ffthelper.pfft! * f.Az⁺
         f.ffthelper.pfft! * f.ϕ⁺
-        #f.ffthelper.pfft! * f.ρ⁺; # not necessary to transform back - they're overwritten
-        #f.ffthelper.pfft! * f.Jx⁺;
-        #f.ffthelper.pfft! * f.Jy⁺;
-        #f.ffthelper.pfft! * f.Jz⁺;
+        f.ffthelper.pfft! * f.ρ⁺;
+        f.ffthelper.pfft! * f.Jx⁺;
+        f.ffthelper.pfft! * f.Jy⁺;
+        f.ffthelper.pfft! * f.Jz⁺;
       end
     end
   end
