@@ -61,7 +61,7 @@ function pic()
     #field = PIC2D3V.LorenzGaugeSemiImplicitField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
     #  fieldimex=PIC2D3V.ImEx(1.0), sourceimex=PIC2D3V.ImEx(0.05), buffer=10, rtol=sqrt(eps()), maxiters=100)
     #diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 1; makegifs=false)
-    shape = PIC2D3V.BSplineWeighting{@stat 2}()
+    shape = PIC2D3V.BSplineWeighting{2}()
     #shape = PIC2D3V.NGPWeighting();#
     #shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vthe, n0, shape;
