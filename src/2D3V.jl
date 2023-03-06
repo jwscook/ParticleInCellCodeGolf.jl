@@ -30,35 +30,37 @@ function pic()
     L = 1.0
     debyeoverresolution = 1
     #vth = debyeoverresolution * dl * sqrt(n0)
-    vthe = 0.1 # 10 keV is 0.1
+    vthe = 0.001 # 10 keV is 0.1
     N_kres = 8
     mi = 16
     n0 = (2π* N_kres)^2 * mi 
-    NG = nextpow(2, sqrt(n0) / vthe)
+    n0 = 4π^2; vthe = sqrt(n0) / 256 * 2
+    NG = nextpow(2, ceil(Int, sqrt(n0) / vthe))
     B0 = sqrt(n0) * 2 / 3; # 2T at 1e20m^-3
     NGT = 256^2
     NY = NG
-    NX = NGT ÷ NY
+    NX = max(1, NGT ÷ NY)
     Lx = 1.0
     Ly = Lx * NY / NX
     @show NG, NX, NY, n0, B0, L
-    P = NX * NY * 2^5
+    P = NX * NY * 2^4
     wci = B0 / mi
     tce = 2π / B0
     tci = tce * mi
     dl = min(Lx / NX, Ly / NY)
-    #dt = dl/6vthe
-    #field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
-    #diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 2)
-    dt = dl/2 * 0.75 #/6vthe
-    NT = Int(nextpow(2, tci / dt * 16))#2^15
-    ntskip = Int(max(1, prevpow(2, round(Int, tci/dt)) / 16))
+    dt = dl/6vthe / 4
+    #dt = dl/2 * 0.75 #/6vthe
+    @show tci, dt
+    NT = nextpow(2, ceil(Int, tci / dt * 16))#2^15
+    ntskip = prevpow(2, ceil(Int, tce/dt / 8))
+    field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
+    diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 1)
     @show dt * vthe / dl
-    field = PIC2D3V.LorenzGaugeStaggeredField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-      imex=PIC2D3V.ImEx(0), buffer=10)
+    #field = PIC2D3V.LorenzGaugeStaggeredField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
+    #  imex=PIC2D3V.ImEx(0), buffer=10)
     #field = PIC2D3V.LorenzGaugeSemiImplicitField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
     #  fieldimex=PIC2D3V.ImEx(1.0), sourceimex=PIC2D3V.ImEx(0.05), buffer=10, rtol=sqrt(eps()), maxiters=100)
-    diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 1; makegifs=false)
+    #diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 1; makegifs=false)
     shape = PIC2D3V.BSplineWeighting{@stat 2}()
     #shape = PIC2D3V.NGPWeighting();#
     #shape = PIC2D3V.AreaWeighting();#
