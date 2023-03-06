@@ -161,10 +161,9 @@ end
 
 
 abstract type AbstractShape end
-struct NGPWeighting <: AbstractShape end
-struct AreaWeighting <: AbstractShape end
-struct BSpline2Weighting <: AbstractShape end
 struct BSplineWeighting{N} <: AbstractShape end
+support(::BSplineWeighting{N}) where N = N+1
+Base.broadcastable(b::BSplineWeighting) = Ref(b)
 
 
 struct Species{S<:AbstractShape}
@@ -177,6 +176,28 @@ struct Species{S<:AbstractShape}
   chunks::Vector{UnitRange{Int}}
   xyvγwork::Matrix{Float64}
 end
+
+function Species(P, vth, density, shape::AbstractShape; Lx, Ly, charge=1, mass=1)
+  x  = Lx * rand(P);#halton.(0:P-1, 2, 1/sqrt(2));#
+  y  = Ly * rand(P);#halton.(0:P-1, 3, 1/sqrt(2));#
+  vx = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  5, 1/sqrt(2)) .- 1);#rand(P));
+  vy = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  7, 1/sqrt(2)) .- 1);#rand(P));
+  vz = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1, 11, 1/sqrt(2)) .- 1);#rand(P));;
+  vx .-= mean(vx)
+  vy .-= mean(vy)
+  vz .-= mean(vz)
+  vx .*= (vth / sqrt(2)) / std(vx);
+  vy .*= (vth / sqrt(2)) / std(vy);
+  vz .*= (vth / sqrt(2)) / std(vz);
+  γ = @. 1 / sqrt(1 - (vx^2 + vy^2 + vz^2))
+  p  = collect(1:P)
+  xyvγ = Matrix(hcat(x, y, vx, vy, vz, γ)')
+  chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
+  weight = calculateweight(density, P)
+  return Species(Float64(charge), Float64(mass), weight, shape, xyvγ, p, chunks, deepcopy(xyvγ))
+end
+
+
 function positions(s::Species; work=false)
   return work ? (@view s.xyvγwork[1:2, :]) : (@view s.xyvγ[1:2, :])
 end
@@ -200,30 +221,10 @@ momentum(s::Species) = sum(velocities(s), dims=2)[:] * s.mass * s.weight
 
 calculateweight(n0, P) = n0 / P;
 
-function Species(P, vth, density, shape::AbstractShape; Lx, Ly, charge=1, mass=1)
-  x  = Lx * rand(P);#halton.(0:P-1, 2, 1/sqrt(2));#
-  y  = Ly * rand(P);#halton.(0:P-1, 3, 1/sqrt(2));#
-  vx = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  5, 1/sqrt(2)) .- 1);#rand(P));
-  vy = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  7, 1/sqrt(2)) .- 1);#rand(P));
-  vz = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1, 11, 1/sqrt(2)) .- 1);#rand(P));;
-  vx .-= mean(vx)
-  vy .-= mean(vy)
-  vz .-= mean(vz)
-  vx .*= (vth / sqrt(2)) / std(vx);
-  vy .*= (vth / sqrt(2)) / std(vy);
-  vz .*= (vth / sqrt(2)) / std(vz);
-  γ = @. 1 / sqrt(1 - (vx^2 + vy^2 + vz^2))
-  p  = collect(1:P)
-  xyvγ = Matrix(hcat(x, y, vx, vy, vz, γ)')
-  chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
-  weight = calculateweight(density, P)
-  return Species(Float64(charge), Float64(mass), weight, shape, xyvγ, p, chunks, deepcopy(xyvγ))
-end
-
 function Base.sort!(s::Species, Δx, Δy)
   sortperm!(s.p, eachindex(s.p),
     by=i->(ceil(Int, s.xyvγ[1,i] / Δx), ceil(Int, s.xyvγ[2,i] / Δy), s.xyvγ[3,i]))
-  s.xyvγ .= s.xyvγ[:, s.p]
+  @turbo s.xyvγ .= s.xyvγ[:, s.p]
   return nothing
 end
 
@@ -299,12 +300,11 @@ function ElectrostaticField(NX, NY=NX, Lx=1, Ly=1; dt, B0x=0, B0y=0, B0z=0, buff
 end
 
 function update!(f::ElectrostaticField)
-  applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
-  applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
-  #@sync begin
-  #  @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
-  #  @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
-  #end
+  @turbo f.Exy .= 0.0
+  @sync begin
+    @spawn applyperiodicity!((@view f.Exy[1, :, :]), f.Ex)
+    @spawn applyperiodicity!((@view f.Exy[2, :, :]), f.Ey)
+  end
 end
 
 abstract type AbstractImEx end
@@ -440,27 +440,27 @@ theta(imex::ImEx) = imex.θ
 theta(::Implicit) = 1
 
 function update!(f::AbstractLorenzGaugeField)
-  f.EBxyz .= 0.0
-  #t1 = @spawn applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
-  #t2 = @spawn applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
-  #t3 = @spawn applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
-  #t4 = @spawn applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
-  #t5 = @spawn applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
-  #t6 = @spawn applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
-  #wait(t4); wait(t5); wait(t6);
-  #@inbounds for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
-  #  f.EBxyz[i+3, j, k] += f.B0[i]
-  #end
-  #wait(t1); wait(t2); wait(t3);
-  applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
-  applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
-  applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
-  applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
-  applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
-  applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+  @turbo f.EBxyz .= 0.0
+  t1 = @spawn applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+  t2 = @spawn applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+  t3 = @spawn applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+  t4 = @spawn applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+  t5 = @spawn applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+  t6 = @spawn applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+  wait(t4); wait(t5); wait(t6);
   @inbounds for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
     f.EBxyz[i+3, j, k] += f.B0[i]
   end
+  wait(t1); wait(t2); wait(t3);
+  #applyperiodicity!((@view f.EBxyz[1, :, :]), f.Ex)
+  #applyperiodicity!((@view f.EBxyz[2, :, :]), f.Ey)
+  #applyperiodicity!((@view f.EBxyz[3, :, :]), f.Ez)
+  #applyperiodicity!((@view f.EBxyz[4, :, :]), f.Bx)
+  #applyperiodicity!((@view f.EBxyz[5, :, :]), f.By)
+  #applyperiodicity!((@view f.EBxyz[6, :, :]), f.Bz)
+  #@inbounds for k in axes(f.EBxyz, 3), j in axes(f.EBxyz, 2), i in 1:3
+  #  f.EBxyz[i+3, j, k] += f.B0[i]
+  #end
 end
 
 function reduction!(a, z)
@@ -472,85 +472,84 @@ end
 
 function reduction!(a, b, c, z)
   @assert size(z, 1) == 4
-  #@sync begin
-  #  @spawn begin
-  #    @. a = 0.0
-  #    @views for k in axes(z, 4)
-  #      applyperiodicity!(a, z[1, :, :, k])
-  #    end
-  #  end
-  #  @spawn begin
-  #    @. b = 0.0
-  #    @views for k in axes(z, 4)
-  #      applyperiodicity!(b, z[2, :, :, k])
-  #    end
-  #  end
-  #  @spawn begin
-  #    @. c = 0.0
-  #    @views for k in axes(z, 4)
-  #      applyperiodicity!(c, z[3, :, :, k])
-  #    end
-  #  end
+  @sync begin
+    @spawn begin
+      @. a = 0.0
+      @views for k in axes(z, 4)
+        applyperiodicity!(a, z[1, :, :, k])
+      end
+    end
+    @spawn begin
+      @. b = 0.0
+      @views for k in axes(z, 4)
+        applyperiodicity!(b, z[2, :, :, k])
+      end
+    end
+    @spawn begin
+      @. c = 0.0
+      @views for k in axes(z, 4)
+        applyperiodicity!(c, z[3, :, :, k])
+      end
+    end
+  end
+  #@. a = 0.0
+  #@views for k in axes(z, 4)
+  #  applyperiodicity!(a, z[1, :, :, k])
   #end
-  @. a = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(a, z[1, :, :, k])
-  end
-  @. b = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(b, z[2, :, :, k])
-  end
-  @. c = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(c, z[3, :, :, k])
-  end
-
+  #@. b = 0.0
+  #@views for k in axes(z, 4)
+  #  applyperiodicity!(b, z[2, :, :, k])
+  #end
+  #@. c = 0.0
+  #@views for k in axes(z, 4)
+  #  applyperiodicity!(c, z[3, :, :, k])
+  #end
 end
 
 function reduction!(a, b, c, d, z)
   @assert size(z, 1) == 4
-#@sync begin
-#  @spawn begin
-#    @. a = 0.0
-#    @views for k in axes(z, 4)
-#      applyperiodicity!(a, z[1, :, :, k])
-#    end
-#  end
-#  @spawn begin
-#    @. b = 0.0
-#    @views for k in axes(z, 4)
-#      applyperiodicity!(b, z[2, :, :, k])
-#    end
-#  end
-#  @spawn begin
-#  @. c = 0.0
-#  @views for k in axes(z, 4)
-#    applyperiodicity!(c, z[3, :, :, k])
-#  end
-#  end
-#  @spawn begin
-#    @. d = 0.0
-#    @views for k in axes(z, 4)
-#     applyperiodicity!(d, z[4, :, :, k])
-#    end
-#  end
-#end
-  @. a = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(a, z[1, :, :, k])
+  @sync begin
+    @spawn begin
+      @. a = 0.0
+      @views for k in axes(z, 4)
+        applyperiodicity!(a, z[1, :, :, k])
+      end
+    end
+    @spawn begin
+      @. b = 0.0
+      @views for k in axes(z, 4)
+        applyperiodicity!(b, z[2, :, :, k])
+      end
+    end
+    @spawn begin
+      @. c = 0.0
+      @views for k in axes(z, 4)
+        applyperiodicity!(c, z[3, :, :, k])
+      end
+    end
+    @spawn begin
+      @. d = 0.0
+      @views for k in axes(z, 4)
+       applyperiodicity!(d, z[4, :, :, k])
+      end
+    end
   end
-  @. b = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(b, z[2, :, :, k])
-  end
-  @. c = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(c, z[3, :, :, k])
-  end
-  @. d = 0.0
-  @views for k in axes(z, 4)
-    applyperiodicity!(d, z[3, :, :, k])
-  end
+  #@. a = 0.0
+  #@views for k in axes(z, 4)
+  #  applyperiodicity!(a, z[1, :, :, k])
+  #end
+  #@. b = 0.0
+  #@views for k in axes(z, 4)
+  #  applyperiodicity!(b, z[2, :, :, k])
+  #end
+  #@. c = 0.0
+  #@views for k in axes(z, 4)
+  #  applyperiodicity!(c, z[3, :, :, k])
+  #end
+  #@. d = 0.0
+  #@views for k in axes(z, 4)
+  #  applyperiodicity!(d, z[3, :, :, k])
+  #end
 end
 
 function particleloop!(plasma, field::ElectrostaticField, dt)
@@ -590,7 +589,7 @@ function loop!(plasma, field::ElectrostaticField, to, t, _)
   @timeit to "Particle Loop" particleloop!(plasma, field, dt)
   @timeit to "Field Reduction" begin
     reduction!(field.ϕ, field.ρs)
-    field.ρs .= 0
+    @turbo field.ρs .= 0
   end
   @timeit to "Field Forward FT" begin
     field.ffthelper.pfft! * field.ϕ;
@@ -656,7 +655,7 @@ function warmup!(ρ, Jx, Jy, Jz, ρJs, plasma, gridparams, dt, to)
   Lx, Ly = gridparams.Lx, gridparams.Ly
   NX_Lx, NY_Ly = gridparams.NX_Lx, gridparams.NY_Ly
   ΔV = cellvolume(gridparams)
-  ρJs .= 0
+  @turbo ρJs .= 0
   @timeit to "Particle Loop" begin
     @threads for j in axes(ρJs, 4)
       ρJ = @view ρJs[:, :, :, j]
@@ -752,7 +751,7 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   @timeit to "Particle Loop" particleloop!(plasma, field, dt)
   @timeit to "Field Reduction" begin
     reduction!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺)
-    field.ρJs⁺ .= 0
+    @turbo field.ρJs⁺ .= 0
   end
   @timeit to "Field Forward FT" begin
     field.ffthelper.pfft! * field.ρ⁺;
@@ -804,14 +803,12 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   end
   @timeit to "Field Update" update!(field)
   @timeit to "Copy over buffers" begin
-    field.ϕ⁻ .= field.ϕ⁰
-    field.ϕ⁰ .= field.ϕ⁺
-    field.Ax⁻ .= field.Ax⁰
-    field.Ax⁰ .= field.Ax⁺
-    field.Ay⁻ .= field.Ay⁰
-    field.Ay⁰ .= field.Ay⁺
-    field.Az⁻ .= field.Az⁰
-    field.Az⁰ .= field.Az⁺
+    @sync begin
+      @spawn (field.ϕ⁻ .= field.ϕ⁰; field.ϕ⁰ .= field.ϕ⁺)
+      @spawn (field.Ax⁻ .= field.Ax⁰; field.Ax⁰ .= field.Ax⁺)
+      @spawn (field.Ay⁻ .= field.Ay⁰; field.Ay⁰ .= field.Ay⁺)
+      @spawn (field.Az⁻ .= field.Az⁰; field.Az⁰ .= field.Az⁺)
+    end
   end
 end
 function particleloop!(plasma, field::LorenzGaugeSemiImplicitField, dt, plasmacopy)
@@ -908,42 +905,23 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
     @timeit to "Field Update" update!(field)
   end
   @timeit to "Copy over buffers" begin
-    field.ρJs⁻ .= field.ρJs⁰
-    field.ρJs⁰ .= field.ρJs⁺
-    field.ϕ⁻ .= field.ϕ⁰
-    field.ϕ⁰ .= field.ϕ⁺
-    field.Ax⁻ .= field.Ax⁰
-    field.Ax⁰ .= field.Ax⁺
-    field.Ay⁻ .= field.Ay⁰
-    field.Ay⁰ .= field.Ay⁺
-    field.Az⁻ .= field.Az⁰
-    field.Az⁰ .= field.Az⁺
+    @sync begin
+      @spawn (field.ρJs⁻ .= field.ρJs⁰; field.ρJs⁰ .= field.ρJs⁺)
+      @spawn (field.ϕ⁻ .= field.ϕ⁰; field.ϕ⁰ .= field.ϕ⁺)
+      @spawn (field.Ax⁻ .= field.Ax⁰; field.Ax⁰ .= field.Ax⁺)
+      @spawn (field.Ay⁻ .= field.Ay⁰; field.Ay⁰ .= field.Ay⁺)
+      @spawn (field.Az⁻ .= field.Az⁰; field.Az⁰ .= field.Az⁺)
+    end
   end
 end
 
 
-
-@inline function depositindicesfractions(s::AbstractShape, z::Float64, NZ::Int,
-    NZ_Lz::Float64)
-  zNZ = z * NZ_Lz # floating point position in units of cells
-  # no need for unimod with offset arrays
-  i = ceil(Int, zNZ) # cell number
-  r = i - zNZ; # distance into cell i in units of cell width
-  @assert 0 < r <= 1 "$z, $NZ, $NZ_Lz, $i"
-  return gridinteractiontuple(s, i, r, NZ)
-end
-
-@inline gridinteractiontuple(::NGPWeighting, i, r, NZ) = ((i, 1), )
 # no need for unimod with offset arrays
-@inline function gridinteractiontuple(::AreaWeighting, i, r, NZ)
-  return ((i, 1-r), (i+1, r))
-end
+bspline(x, ::BSplineWeighting{N}) where N = bspline(x, BSplineWeighting{Int(N)}())
 
-bspline(::BSplineWeighting{@stat N}, x) where N = bspline(BSplineWeighting{Int(N)}(), x)
-
-@inline bspline(::BSplineWeighting{0}, x) = ((1.0),)
-@inline bspline(::BSplineWeighting{1}, x) = (x, 1-x)
-function bspline(::BSplineWeighting{2}, x)
+@inline bspline(x, ::BSplineWeighting{0}) = ((1.0),)
+@inline bspline(x, ::BSplineWeighting{1}) = (x, 1-x)
+function bspline(x, ::BSplineWeighting{2})
   @fastmath begin
     a = 9/8 + 3/2*(x-1.5) + 1/2*(x-1.5)^2
     b = 3/4               -     (x-0.5)^2
@@ -951,7 +929,7 @@ function bspline(::BSplineWeighting{2}, x)
   end
   return (a, b, c)
 end
-function bspline(::BSplineWeighting{3}, x)
+function bspline(x, ::BSplineWeighting{3})
   @fastmath begin
     a = 4/3 + 2*(x-2) + (x-2)^2 + 1/6*(x-2)^3
     b = 2/3           - (x-1)^2 - 1/2*(x-1)^3
@@ -960,7 +938,7 @@ function bspline(::BSplineWeighting{3}, x)
   end
   return (a, b, c, d)
 end
-function bspline(::BSplineWeighting{4}, x)
+function bspline(x, ::BSplineWeighting{4})
   @fastmath begin
     a = 625/384 + 125/48*(x-2.5) + 25/16*(x-2.5)^2 + 5/12*(x-2.5)^3 + 1/24*(x-2.5)^4
     b = 55/96   -   5/24*(x-1.5) -   5/4*(x-1.5)^2 -  5/6*(x-1.5)^3 -  1/6*(x-1.5)^4
@@ -970,7 +948,7 @@ function bspline(::BSplineWeighting{4}, x)
   end
   return (a, b, c, d, e)
 end
-function bspline(::BSplineWeighting{5}, x)
+function bspline(x, ::BSplineWeighting{5})
   @fastmath begin
   a = 243/120 + 81/24*(x-3) + 9/4*(x-3)^2 + 3/4*(x-3)^3 + 1/8*(x-3)^4 + 1/120*(x-3)^5
   b = 17/40   -   5/8*(x-2) - 7/4*(x-2)^2 - 5/4*(x-2)^3 - 3/8*(x-2)^4 -  1/24*(x-2)^5
@@ -982,37 +960,82 @@ function bspline(::BSplineWeighting{5}, x)
   return (a, b, c, d, e, f)
 end
 
-@inline indices(::BSplineWeighting{N}, i) where N = (i-fld(N, 2)):(i+cld(N, 2))
+@inline indices(i, s::BSplineWeighting{N}) where N = firstindex(i, s):lastindex(i, s)
+@inline firstindex(i, ::BSplineWeighting{N}) where N = i-fld(N, 2)
+@inline lastindex(i, ::BSplineWeighting{N}) where N = i+cld(N, 2)
 
 for N in 0:2:10
-  @eval _bsplineinputs(::BSplineWeighting{@stat $(N+1)}, i, centre, ) = (i, 1 - centre)
-  @eval function _bsplineinputs(::BSplineWeighting{@stat $N}, i, centre, )
+  @eval _bsplineinputs(i, centre, s::BSplineWeighting{$(N+1)}) = (i, 1 - centre)
+  @eval function _bsplineinputs(i, centre, ::BSplineWeighting{$N})
     q = centre > 0.5
     return (i + q, q + 0.5 - centre)
   end
 end
+#function _bsplineinputs(i, centre, ::BSplineWeighting{N}) where N
+#  return _bsplineinputs(i, centre, BSplineWeighting{@stat N}())
+#end
 
-@inline function gridinteractiontuple(s::BSplineWeighting{N}, i, centre::T, NZ
-    ) where {N,T}
-#  (j, z) = if isodd(N)
-#    (i, 1 - centre)
-#  else
-#    q = centre > 0.5
-#    (i + q, q + 0.5 - centre)
-#  end
-  j, z = _bsplineinputs(s, i, centre)
-  inds = indices(s, j)
-  fractions = bspline(s, z)
+@inline function depositindicesfractions(s::AbstractShape, z::Float64, NZ::Int,
+    NZ_Lz::Float64)
+  zNZ = z * NZ_Lz # floating point position in units of cells
+  # no need for unimod with offset arrays
+  i = ceil(Int, zNZ) # cell number
+  r = i - zNZ; # distance into cell i in units of cell width
+  @assert 0 < r <= 1 "$z, $NZ, $NZ_Lz, $i"
+  return gridinteractiontuple(i, r, NZ, s)
+end
+
+@inline function gridinteractiontuple(i, centre, NZ, s::AbstractShape)
+  j, z = _bsplineinputs(i, centre, s)
+  inds = indices(j, s)
+  fractions = bspline(z, s)
   #@assert sum(fractions) ≈ 1 "$(sum(fractions)), $fractions"
   return zip(inds, fractions)
 end
+
+# ##### For GPU #####
+#@inline function particlesplinedata(ind::Int, centre, NZ, shape)
+#  j, z = _bsplineinputs(ind, centre, shape)
+#  firstind = firstindex(j, shape)
+#  fractions = bspline(z, shape)
+#  #@assert sum(fractions) ≈ 1 "$(sum(fractions)), $fractions"
+#  return firstind, fractions
+#end
+#
+#@inline function tupliser(a::Int, b::Int, c::NTuple{N, T}, d::NTuple{N, T}) where {N,T}
+#  return NTuple{2N+2, T}((a, b, c..., d...))
+#end
+#
+#@inline function gridparticledata(x::Float64, y::Float64, NX::Int, NY::Int,
+#    NX_Lx::Float64, NY_Ly::Float64, s::AbstractShape)
+#  xNX = x * NX_Lx # floating point position in units of cells
+#  i = ceil(Int, xNX) # cell number
+#  centrex = i - xNX; # distance into cell i in units of cell width
+#  #@assert 0 < centrex <= 1 "$x, $NX, $NX_Lx, $i"
+#  yNY = y * NY_Ly # floating point position in units of cells
+#  j = ceil(Int, yNY) # cell number
+#  centrey = j - yNY; # distance into cell i in units of cell width
+#  #@assert 0 < centrex <= 1 "$y, $NY, $NY_Ly, $i"
+#  indi, fractionsi = particlesplinedata(i, centrex, NX, s)
+#  indj, fractionsj = particlesplinedata(j, centrey, NY, s)
+#  return tupliser(indi, indj, fractionsi, fractionsj)
+#end
+# ## this one runs by e.g. @oneapi
+#function gridparticledata!(storage, xy, NX::Int, NY::Int,
+#    NX_Lx::Float64, NY_Ly::Float64, s::AbstractShape)
+#  @views for i in 1:size(xy, 2)
+#    storage[:, i] .= gridparticledata(xy[1, i], xy[2, i], NX, NY, NX_Lx, NY_Ly, s)
+#  end
+#end
+# ###################
+
 
 # NG = 64
 # x = 1/NG/2:1/NG:1-1/NG/2
 # h = plot(xticks=0:23)
 # for N in 0:5
 #   for i in 1:N+1
-#     plot!(h, x .+ i .- 1, [bspline(BS{N}(), xi)[i] for xi in x], label="$N,$i")
+#     plot!(h, x .+ i .- 1, [bspline(xi, BS{N}())[i] for xi in x], label="$N,$i")
 #   end
 # end
 #
@@ -1024,7 +1047,7 @@ end
 #     xc = (N+1)/2
 #     for i in 1:N+1
 #       plot!(h, x .+ i .- 1 .- xc .+ cell .+ dist,
-#        [bspline(BS{N}(), xi)[i] for xi in x], label="$N,$i", legend=false)
+#        [bspline(xi, BS{N}())[i] for xi in x], label="$N,$i", legend=false)
 #     end
 #     for (a, b) in git(BS{N}(), cell, dist, 32)
 #       scatter!(h, [a], [b])
@@ -1284,13 +1307,15 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
   plot!(ts, d.fieldenergy + d.kineticenergy, label="Total")
   savefig("Energies.png")
 
-  fieldmom = cat(d.fieldmomentum..., dims=2)'
-  particlemom = cat(d.particlemomentum..., dims=2)'
-  plot(ts, fieldmom, label="Fields")
-  plot!(ts, particlemom, label="Particles")
-  plot!(ts, fieldmom .+ particlemom, label="Total")
-  savefig("Momenta.png")
- 
+  if hasfield(typeof(d), :fieldmomentum)
+    fieldmom = cat(d.fieldmomentum..., dims=2)'
+    particlemom = cat(d.particlemomentum..., dims=2)'
+    plot(ts, fieldmom, label="Fields")
+    plot!(ts, particlemom, label="Particles")
+    plot!(ts, fieldmom .+ particlemom, label="Total")
+    savefig("Momenta.png")
+  end
+   
   wind = findlast(ws .< max(cutoff, 6 * sqrt(n0)/w0));
   isnothing(wind) && (wind = length(ws)÷2)
   kxind = min(length(kxs)÷2-1, 128)
