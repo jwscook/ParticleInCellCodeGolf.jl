@@ -1,5 +1,5 @@
 using ProgressMeter, TimerOutputs, Plots, FFTW, Random, StaticNumbers
-using ThreadPinning
+using ThreadPinning, oneAPI
 if Base.Sys.isunix()
   pinthreads([0:2:(Threads.nthreads()-1)÷2])
 end
@@ -53,7 +53,7 @@ function pic()
     @show tci, dt
     NT = nextpow(2, ceil(Int, tci / dt * 16))#2^15
     ntskip = prevpow(2, ceil(Int, tce/dt / 8))
-    field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0)
+    field = PIC2D3V.ElectrostaticField(NX, NY, Lx, Ly, dt=dt, B0x=B0; farray=oneArray)
     diagnostics = PIC2D3V.ElectrostaticDiagnostics(NX, NY, NT, ntskip, 1)
     @show dt * vthe / dl
     #field = PIC2D3V.LorenzGaugeStaggeredField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
@@ -65,11 +65,11 @@ function pic()
     #shape = PIC2D3V.NGPWeighting();#
     #shape = PIC2D3V.AreaWeighting();#
     electrons = PIC2D3V.Species(P, vthe, n0, shape;
-      Lx=Lx, Ly=Ly, charge=-1, mass=1)
+      Lx=Lx, Ly=Ly, charge=-1, mass=1, farray=oneArray)
     ions = PIC2D3V.Species(P, vthe / sqrt(mi), n0, shape;
-      Lx=Lx, Ly=Ly, charge=1, mass=mi)
-    sort!(electrons, Lx / NX, Ly / NY)
-    sort!(ions, Lx / NX, Ly / NY)
+      Lx=Lx, Ly=Ly, charge=1, mass=mi, farray=oneArray)
+    #sort!(electrons, Lx / NX, Ly / NY)
+    #sort!(ions, Lx / NX, Ly / NY)
     plasma = [electrons, ions]
 
     @show NX, NY, P, NT, NT÷ntskip, ntskip, dl, n0, vthe, B0, dt
@@ -82,10 +82,10 @@ function pic()
   for t in 0:NT-1;
     PIC2D3V.loop!(plasma, field, to, t, plasmacopy)
     PIC2D3V.diagnose!(diagnostics, field, plasma, t, to)
-    if t % 256 == 0
-      sort!(electrons, Lx / NX, Ly / NY)
-      sort!(ions, Lx / NX, Ly / NY)
-    end
+    #if t % 256 == 0
+    #  sort!(electrons, Lx / NX, Ly / NY)
+    #  sort!(ions, Lx / NX, Ly / NY)
+    #end
   end
 
   show(to)
