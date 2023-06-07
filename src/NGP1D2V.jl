@@ -19,8 +19,8 @@ function halton(i, base, seed=0.0)
 end
 
 function pic()
-  N=128;P=15N;T=2^13;TO=T÷16;
-  n0=4*pi^2;vth=sqrt(n0)/N;dt=1/N/6vth;B0=sqrt(n0)/16;w=n0/P;
+  N=512;P=15N;T=2^14;TO=T÷16;
+  n0=4*pi^2;vth=sqrt(n0)/N/4;dt=1/N/6vth;B0=sqrt(n0)/16;w=n0/P;
   @show N, P, T, TO, n0, vth, B0, dt
   @show 2pi^2 * (vth / B0)^2
   ξ=im*zeros(N);Es=zeros(N,TO);
