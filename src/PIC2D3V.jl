@@ -74,6 +74,7 @@ struct ElectrostaticDiagnostics <: AbstractDiagnostics
   kineticenergy::Vector{Float64}
   fieldenergy::Vector{Float64}
   particlemomentum::Vector{Vector{Float64}}
+  characteristicmomentum::Vector{Vector{Float64}}
   Exs::Array{Float64, 3}
   Eys::Array{Float64, 3}
   ϕs::Array{Float64, 3}
@@ -94,7 +95,7 @@ function ElectrostaticDiagnostics(NX, NY, NT, ntskip, ngskip=1; makegifs=false)
   @assert NT >= ntskip
   @assert ispow2(ngskip)
   scalarstorage, momentumstorage, fieldstorage = generatestorage(
-    NX÷ngskip, NY÷ngskip, NT÷ntskip, 2, 1, 3)
+    NX÷ngskip, NY÷ngskip, NT÷ntskip, 2, 2, 3)
   return ElectrostaticDiagnostics(scalarstorage..., momentumstorage...,
     fieldstorage..., ntskip, ngskip, Ref(0), makegifs)
 end
@@ -104,6 +105,7 @@ struct LorenzGaugeDiagnostics <: AbstractDiagnostics
   fieldenergy::Array{Float64, 1}
   particlemomentum::Vector{Vector{Float64}}
   fieldmomentum::Vector{Vector{Float64}}
+  characteristicmomentum::Vector{Vector{Float64}}
   Exs::Array{Float64, 3}
   Eys::Array{Float64, 3}
   Ezs::Array{Float64, 3}
@@ -129,7 +131,7 @@ function LorenzGaugeDiagnostics(NX, NY, NT::Int, ntskip::Int, ngskip=1;
   @assert NT >= ntskip
   @assert ispow2(ngskip)
   scalarstorage, momentumstorage, fieldstorage = generatestorage(
-    NX÷ngskip, NY÷ngskip, NT÷ntskip, 2, 2, 14)
+    NX÷ngskip, NY÷ngskip, NT÷ntskip, 2, 3, 14)
   return LorenzGaugeDiagnostics(scalarstorage..., momentumstorage...,
     fieldstorage..., ntskip, ngskip, Ref(0), makegifs)
 end
@@ -168,9 +170,18 @@ end
 
 kineticenergy(s::Species) = sum(abs2, velocities(s)) * s.mass / 2 * s.weight
 
-momentum(s::Species) = sum(velocities(s), dims=2)[:] * s.mass * s.weight
+function momentum(s::Species, op::F=identity) where F
+  #output = sum(op.(velocities(s)), dims=2)[:] * s.mass * s.weight
+  output = @MVector [0.0, 0.0, 0.0]
+  for v in eachcol(velocities(s))
+    output .+= op.(v)
+  end
+  output .*= s.mass * s.weight
+  return output
+end
+characteristicmomentum(s::Species) = momentum(s, abs)
 
-calculateweight(n0, P) = n0 / P;
+calculateweight(n0, P, Lx, Ly) = n0 * Lx * Ly / P;
 
 function Species(P, vth, density, shape::AbstractShape; Lx, Ly, charge=1, mass=1)
   x  = Lx * rand(P);#halton.(0:P-1, 2, 1/sqrt(2));#
@@ -187,7 +198,7 @@ function Species(P, vth, density, shape::AbstractShape; Lx, Ly, charge=1, mass=1
   p  = collect(1:P)
   xyv = Matrix(hcat(x, y, vx, vy, vz)')
   chunks = collect(Iterators.partition(1:P, ceil(Int, P/nthreads())))
-  weight = calculateweight(density, P)
+  weight = calculateweight(density, P, Lx, Ly)
   return Species(Float64(charge), Float64(mass), weight, shape, xyv, p, chunks, deepcopy(xyv))
 end
 
@@ -772,6 +783,7 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
   NX_Lx, NY_Ly = field.gridparams.NX_Lx, field.gridparams.NY_Ly
   ΔV = cellvolume(field.gridparams)
+  Lx, Ly, NX_Lx, NY_Ly
 
   @timeit to "Particle Loop" begin
     @threads for j in axes(field.ρJs⁺, 4)
@@ -786,25 +798,25 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
         vz = @view velocities(species)[3, :]
         #  E.....E.....E
         #  B.....B.....B
-        #  ϕ.....ϕ.....ϕ
-        #  -..A..0..A..+..A
-        #  ρ.....ρ.....ρ
-        #  -..J..0..J..+..J
+        #  ...ϕ.....ϕ.....ϕ
+        #  A..0..A..+..A
+        #  ...ρ.....ρ.....ρ
+        #  J..0..J..+..J
         #  x.....x.....x
-        #  -..v..0..v..+..v
-        for i in species.chunks[j]
+        #  v..0..v..+..v
+        @inbounds for i in species.chunks[j]
           Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
           vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
             Bxi, Byi, Bzi, q_m);
           x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
           y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
-          # deposit J at the (n+1/2)th point
-          deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly,
-            vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
+          # deposit ρ at (n+1/2)th timestep
+          deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
           x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
           y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
-          # now deposit ρ at (n+1)th timestep
-          deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
+          # deposit J at the (n+1)th point
+          deposit!(ρJ⁺, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+            vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
         end
       end
     end
@@ -952,15 +964,15 @@ function loop!(plasma, field::LorenzGaugeSemiImplicitField, to, t, plasmacopy = 
     end
     @timeit to "Calculate E, B" begin
       θ = theta(field.fieldimex)
-      @. field.Ex = -im * field.ffthelper.kx * (θ/2 * (field.ϕ⁺ + field.ϕ⁻) + (1-θ)*field.ϕ⁰) 
+      @. field.Ex = -im * field.ffthelper.kx * (θ/2 * (field.ϕ⁺ + field.ϕ⁻) + (1-θ)*field.ϕ⁰)
       @. field.Ey = -im * field.ffthelper.ky * (θ/2 * (field.ϕ⁺ + field.ϕ⁻) + (1-θ)*field.ϕ⁰)
       @. field.Ex -= (field.Ax⁺ - field.Ax⁻)/2dt
       @. field.Ey -= (field.Ay⁺ - field.Ay⁻)/2dt
       @. field.Ez = -(field.Az⁺ - field.Az⁻)/2dt
-      @. field.Bx =  im * field.ffthelper.ky * (θ/2 * (field.Az⁺ + field.Az⁻) + (1-θ)*field.Az⁰) 
-      @. field.By = -im * field.ffthelper.kx * (θ/2 * (field.Az⁺ + field.Az⁻) + (1-θ)*field.Az⁰) 
-      @. field.Bz =  im * field.ffthelper.kx * (θ/2 * (field.Ay⁺ + field.Ay⁻) + (1-θ)*field.Ay⁰) 
-      @. field.Bz -= im * field.ffthelper.ky * (θ/2 * (field.Ax⁺ + field.Ax⁻) + (1-θ)*field.Ax⁰) 
+      @. field.Bx =  im * field.ffthelper.ky * (θ/2 * (field.Az⁺ + field.Az⁻) + (1-θ)*field.Az⁰)
+      @. field.By = -im * field.ffthelper.kx * (θ/2 * (field.Az⁺ + field.Az⁻) + (1-θ)*field.Az⁰)
+      @. field.Bz =  im * field.ffthelper.kx * (θ/2 * (field.Ay⁺ + field.Ay⁻) + (1-θ)*field.Ay⁰)
+      @. field.Bz -= im * field.ffthelper.ky * (θ/2 * (field.Ax⁺ + field.Ax⁻) + (1-θ)*field.Ax⁰)
     end
     @timeit to "Field Inverse FT" begin
       field.ffthelper.pifft! * field.Ex
@@ -1188,6 +1200,7 @@ function diagnose!(d::AbstractDiagnostics, plasma, to)
     ti = d.ti[]
     d.kineticenergy[ti] = sum(kineticenergy(s) for s in plasma)
     d.particlemomentum[ti] .= sum(momentum(s) for s in plasma)
+    d.characteristicmomentum[ti] .= sum(characteristicmomentum(s) for s in plasma)
   end
 end
 
@@ -1300,7 +1313,7 @@ function diagnosticfields(d::LorenzGaugeDiagnostics)
           (d.ϕs, "ϕ"), (d.ρs, "ρ"))
 end
 
-function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
+function plotfields(d::AbstractDiagnostics, field, n0, vc, NT; cutoff=Inf)
   B0 = norm(field.B0)
   w0 = iszero(B0) ? sqrt(n0) : B0
   dt = timestep(field)
@@ -1308,16 +1321,16 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
   NXd = g.NX÷d.ngskip
   NYd = g.NY÷d.ngskip
   Lx, Ly = field.gridparams.Lx, field.gridparams.Ly
-  xs = collect(1:NXd) ./ NXd ./ (vth / w0) * Lx
-  ys = collect(1:NYd) ./ NYd ./ (vth / w0) * Ly
+  xs = collect(1:NXd) ./ NXd ./ (vc / w0) * Lx
+  ys = collect(1:NYd) ./ NYd ./ (vc / w0) * Ly
   ndiags = d.ti[]
   ts = collect(1:ndiags) .* ((NT * dt / ndiags) / (2pi/w0))
 
   filter = sin.((collect(1:ndiags) .- 0.5) ./ ndiags .* pi)'
   ws = 2π / (NT * dt) .* (1:ndiags) ./ (w0);
-  
-  kxs = 2π/Lx .* collect(0:NXd-1) ./ (w0/vth);
-  kys = 2π/Ly .* collect(0:NYd-1) ./ (w0/vth);
+
+  kxs = 2π/Lx .* collect(0:NXd-1) ./ (w0/vc);
+  kys = 2π/Ly .* collect(0:NYd-1) ./ (w0/vc);
 
   k0 = d.fieldenergy[1] + d.kineticenergy[1]
 
@@ -1328,11 +1341,14 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
 
   fieldmom = cat(d.fieldmomentum..., dims=2)'
   particlemom = cat(d.particlemomentum..., dims=2)'
-  plot(ts, fieldmom, label="Fields")
-  plot!(ts, particlemom, label="Particles")
-  plot!(ts, fieldmom .+ particlemom, label="Total")
+  characteristicmom = cat(d.characteristicmomentum..., dims=2)'
+  p0 = characteristicmom[1]
+  plot(ts, fieldmom ./ p0, label="Fields")
+  plot!(ts, characteristicmom ./ p0, label="Characteristic")
+  plot!(ts, particlemom ./ p0, label="Particles")
+  plot!(ts, (fieldmom .+ particlemom) ./ p0, label="Total")
   savefig("Momenta.png")
- 
+
   wind = findlast(ws .< max(cutoff, 6 * sqrt(n0)/w0));
   isnothing(wind) && (wind = length(ws)÷2)
   kxind = min(length(kxs)÷2-1, 128)
@@ -1346,39 +1362,39 @@ function plotfields(d::AbstractDiagnostics, field, n0, vth, NT; cutoff=Inf)
       nsy = ceil(Int, size(F,2) / 128)
       anim = @animate for i in axes(F, 3)
         heatmap(xs[1:nsx:end], ys[1:nsy:end], F[1:nsx:end, 1:nsy:end, i] ./ maxabsF)
-        xlabel!(L"Position x $[v_{th} / \Omega]$");
-        ylabel!(L"Position y $[v_{th} / \Omega]$")
+        xlabel!(L"Position x $[V_{A} / \Omega]$");
+        ylabel!(L"Position y $[V_{A} / \Omega]$")
       end
       gif(anim, "PIC2D3V_$(FS)_XY.gif", fps=10)
     end
 
 #    heatmap(xs, ys, F[:, :, 1])
-#    xlabel!(L"Position x $[v_{th} / \Omega]$");
-#    ylabel!(L"Position y $[v_{th} / \Omega]$")
+#    xlabel!(L"Position x $[v_{A} / \Omega]$");
+#    ylabel!(L"Position y $[v_{A} / \Omega]$")
 #    savefig("PIC2D3V_$(FS)_XY_ic.png")
 #
 #    heatmap(xs, ys, F[:, :, end])
-#    xlabel!(L"Position x $[v_{th} / \Omega]$");
-#    ylabel!(L"Position y $[v_{th} / \Omega]$")
+#    xlabel!(L"Position x $[v_{A} / \Omega]$");
+#    ylabel!(L"Position y $[v_{A} / \Omega]$")
 #    savefig("PIC2D3V_$(FS)_XY_final.png")
 
     Z = log10.(abs.(fft(F)[2:kxind, 1, 1:wind]))'
     heatmap(kxs[2:kxind], ws[1:wind], Z)
-    xlabel!(L"Wavenumber x $[\Omega_c / v_{th}]$");
+    xlabel!(L"Wavenumber x $[\Omega_c / V_{A}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumy_c.png")
-    xlabel!(L"Wavenumber x $[\Pi / v_{th}]$");
+    xlabel!(L"Wavenumber x $[\Pi / V_{A}]$");
     ylabel!(L"Frequency $[\Pi]$")
     heatmap(kxs[2:kxind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
     savefig("PIC2D3V_$(FS)_WKsumy_p.png")
-   
+
     Z = log10.(abs.(fft(F)[1, 2:kyind, 1:wind]))'
     heatmap(kys[2:kyind], ws[1:wind], Z)
-    xlabel!(L"Wavenumber y $[\Omega_c / v_{th}]$");
+    xlabel!(L"Wavenumber y $[\Omega_c / V_{A}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumx_c.png")
     heatmap(kys[2:kyind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
-    xlabel!(L"Wavenumber y $[\Pi / v_{th}]$");
+    xlabel!(L"Wavenumber y $[\Pi / V_{A}]$");
     ylabel!(L"Frequency $[\Pi]$")
     savefig("PIC2D3V_$(FS)_WKsumx_p.png")
   end
