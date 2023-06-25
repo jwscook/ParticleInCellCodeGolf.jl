@@ -4,6 +4,7 @@ using FFTW,Plots, SpecialFunctions, StaticArrays, LinearAlgebra, Random
 using LoopVectorization, Base.Threads, ThreadsX, Base.Iterators, Statistics
 using ProgressMeter, LaTeXStrings, MuladdMacro, CommonSubexpressions
 using TimerOutputs, StaticNumbers, OffsetArrays, FastPow, ThreadsX
+using QuasiMonteCarlo
 
 unimod(x, n) = x > n ? x - n : x > 0 ? x : x + n
 
@@ -183,12 +184,16 @@ characteristicmomentum(s::Species) = momentum(s, abs)
 
 calculateweight(n0, P, Lx, Ly) = n0 * Lx * Ly / P;
 
+sample(P, i) = halton.(0:P-1, i, 1/sqrt(2));#
+#sample(P, _) = unimod.(rand() .+ reshape(QuasiMonteCarlo.sample(P,1,GoldenSample()), P), 1)
+#sample(P, _) = unimod.(rand() .+ rand(P), 1)
+
 function Species(P, vth, density, shape::AbstractShape; Lx, Ly, charge=1, mass=1)
-  x  = Lx * rand(P);#halton.(0:P-1, 2, 1/sqrt(2));#
-  y  = Ly * rand(P);#halton.(0:P-1, 3, 1/sqrt(2));#
-  vx = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  5, 1/sqrt(2)) .- 1);#rand(P));
-  vy = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1,  7, 1/sqrt(2)) .- 1);#rand(P));
-  vz = vth * erfinv.(2rand(P) .- 1) * vth;#erfinv.(2halton.(0:P-1, 11, 1/sqrt(2)) .- 1);#rand(P));;
+  x  = Lx * sample(P, 2);
+  y  = Ly * sample(P, 3);
+  vx = vth * erfinv.(2sample(P, 5) .- 1) * vth;
+  vy = vth * erfinv.(2sample(P, 7) .- 1) * vth;
+  vz = vth * erfinv.(2sample(P, 9) .- 1) * vth;
   vx .-= mean(vx)
   vy .-= mean(vy)
   vz .-= mean(vz)
@@ -239,6 +244,7 @@ struct FFTHelper{T, U, V}
   ky::LinearAlgebra.Adjoint{Float64, Vector{Float64}}
   k²::Matrix{Float64}
   im_k⁻²::Matrix{ComplexF64}
+  smoothingkernel::Matrix{ComplexF64}
   pfft!::T
   pifft!::U
   pifft::V
@@ -250,10 +256,16 @@ function FFTHelper(NX, NY, Lx, Ly)
   im_k⁻² = -im ./ k²
   im_k⁻²[1, 1] = 0
   z = zeros(ComplexF64, NX, NY)
+  kernel = [0.1 0.25 0.1; 0.25 0.5 0.2; 0.1 0.25 0.1]
+  kernel ./= sum(kernel)
+  smoothingkernel = zeros(ComplexF64, NX, NY)
+  smoothingkernel[1:size(kernel,1), 1:size(kernel, 2)] .= kernel
+
   pfft! = plan_fft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
   pifft! = plan_ifft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
   pifft = plan_ifft(z; flags=FFTW.ESTIMATE, timelimit=Inf)
-  return FFTHelper(kx, ky, k², im_k⁻², pfft!, pifft!, pifft)
+  pfft! * smoothingkernel
+  return FFTHelper(kx, ky, k², im_k⁻², smoothingkernel, pfft!, pifft!, pifft)
 end
 
 
@@ -570,6 +582,33 @@ function loop!(plasma, field::ElectrostaticField, to, t, _)
   @timeit to "Field Update" update!(field)
 end
 
+function smooth!(a, ffthelper)
+  ffthelper.pfft! * a
+  a .*= ffthelper.smoothingkernel
+  ffthelper.pifft! * a
+  a .= real(a)
+end
+
+function smooth!(a, b, c, d, ffthelper)
+  smooth!(a, ffthelper)
+  smooth!(b, ffthelper)
+  smooth!(c, ffthelper)
+  smooth!(d, ffthelper)
+end
+
+## -∇² lhs = rhs
+function neglaplacesolve!(lhs, rhs, ffthelper)
+  ffthelper.pfft! * rhs
+  @threads for j in axes(lhs, 2)
+    for i in axes(lhs, 1)
+      lhs[i, j] = rhs[i, j] / ffthelper.k²[i, j]
+    end
+  end
+  lhs[1, 1] = 0
+  ffthelper.pifft! * rhs
+  ffthelper.pifft! * lhs
+end
+
 @inline denominator(::Explicit, dt², k²) = 1
 @inline denominator(::Implicit, dt², k²) = 1 + dt² * k² / 2
 @inline denominator(imex::ImEx, dt², k²) = 1 + dt² * k² * theta(imex) / 2
@@ -652,28 +691,6 @@ function loop!(plasma, field::LorenzGaugeField, to, t, _)
           # spatial advection, effectively using v at (n+1/2)
           x[i] = unimod(x[i] + (vxi + vx[i]) / 2 * dt, Lx)
           y[i] = unimod(y[i] + (vyi + vy[i]) / 2 * dt, Ly)
-
-          #    Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
-          #    vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
-          #      Bxi, Byi, Bzi, q_m);
-          #    x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
-          #    y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
-          #    # deposit J at the (n+1/2)th point
-          #    deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
-          #      vx[i] * qw_ΔV, vy[i] * qw_ΔV, vz[i] * qw_ΔV)
-          #    x[i] = unimod(x[i] + vx[i] * dt/2, Lx)
-          #    y[i] = unimod(y[i] + vy[i] * dt/2, Ly)
-          #    # now deposit ρ at (n+1)th timestep
-          #    deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly, qw_ΔV)
-
-          #####x[i] = unimod(x[i] + vx[i] / 2 * dt, Lx)
-          #####y[i] = unimod(y[i] + vy[i] / 2 * dt, Ly)
-          #####Exi, Eyi, Ezi, Bxi, Byi, Bzi = field(species.shape, x[i], y[i])
-          ###### accelerate velocities from n to (n+1)
-          #####vx[i], vy[i], vz[i] = field.boris(vx[i], vy[i], vz[i], Exi, Eyi, Ezi,
-          #####  Bxi, Byi, Bzi, q_m);
-          #####x[i] = unimod(x[i] + vx[i] / 2 * dt, Lx)
-          #####y[i] = unimod(y[i] + vy[i] / 2 * dt, Ly)
 
           # now deposit at (n+1)th timestep
           deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
@@ -758,13 +775,91 @@ function warmup!(ρ, Jx, Jy, Jz, ρJs, plasma, gridparams, dt, to)
     reduction!(ρ, Jx, Jy, Jz, ρJs)
   end
 end
+function advect!(plasma, gridparams, dt, to)
+  Lx, Ly = gridparams.Lx, gridparams.Ly
+  @timeit to "Advect Loop" begin
+    for species in plasma
+      @threads for j in eachindex(species.chunks)
+        x = @view positions(species)[1, :]
+        y = @view positions(species)[2, :]
+        vx = @view velocities(species)[1, :]
+        vy = @view velocities(species)[2, :]
+        vz = @view velocities(species)[3, :]
+        for i in species.chunks[j]
+          x[i] = unimod(x[i] + vx[i] * dt, Lx)
+          y[i] = unimod(y[i] + vy[i] * dt, Ly)
+        end
+      end
+    end
+  end
+end
+function defaultdepositcallback(qw_ΔV, vx, vy, vz)
+    return (1.0, vx, vy, vz) .* qw_ΔV
+end
+function deposit!(ρ, Jx, Jy, Jz, ρJs, plasma, gridparams, dt, to,
+        cb::F=defaultdepositcallback) where F
+  Lx, Ly = gridparams.Lx, gridparams.Ly
+  NX_Lx, NY_Ly = gridparams.NX_Lx, gridparams.NY_Ly
+  ΔV = cellvolume(gridparams)
+  ρJs .= 0
+  @timeit to "Particle Loop" begin
+    @threads for j in axes(ρJs, 4)
+      ρJ = @view ρJs[:, :, :, j]
+      for species in plasma
+        qw_ΔV = species.charge * species.weight / ΔV
+        x = @view positions(species)[1, :]
+        y = @view positions(species)[2, :]
+        vx = @view velocities(species)[1, :]
+        vy = @view velocities(species)[2, :]
+        vz = @view velocities(species)[3, :]
+        for i in species.chunks[j]
+          deposit!(ρJ, species.shape, x[i], y[i], NX_Lx, NY_Ly,
+                   cb(qw_ΔV, vx[i], vy[i], vz[i])...)
+        end
+      end
+    end
+  end
+  @timeit to "Field Reduction" begin
+    reduction!(ρ, Jx, Jy, Jz, ρJs)
+  end
+end
+
 
 function warmup!(field::LorenzGaugeStaggeredField, plasma, to)
+  ρcallback(qw_ΔV, vx, vy, vz) = (qw_ΔV,)
+  Jcallback(qw_ΔV, vx, vy, vz) = qw_ΔV .* (vx, vy, vz)
   @timeit to "Warmup" begin
     dt = timestep(field)
-    warmup!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁺, plasma, field.gridparams, -dt, to)
-    warmup!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁺, plasma, field.gridparams, 0, to)
-    warmup!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺, plasma, field.gridparams, dt, to)
+    advect!(plasma, field.gridparams, -3dt/2, to) #n - 3/2
+    deposit!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁺, plasma, field.gridparams, -dt, to, ρcallback)
+    #neglaplacesolve!(field.ϕ⁻, field.ρ⁻, field.ffthelper)
+    advect!(plasma, field.gridparams, dt/2, to) #(n-1)
+    deposit!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁺, plasma, field.gridparams, -dt, to, Jcallback)
+    #neglaplacesolve!(field.Ax⁻, field.Jx⁻, field.ffthelper)
+    #neglaplacesolve!(field.Ay⁻, field.Jy⁻, field.ffthelper)
+    #neglaplacesolve!(field.Az⁻, field.Jz⁻, field.ffthelper)
+    field.ρJs⁺ .= 0
+
+    advect!(plasma, field.gridparams, dt/2, to)
+    deposit!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁺, plasma, field.gridparams, dt, to, ρcallback)
+    #neglaplacesolve!(field.ϕ⁰, field.ρ⁰, field.ffthelper)
+    advect!(plasma, field.gridparams, dt/2, to) # back to start, n
+    deposit!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁺, plasma, field.gridparams, dt, to, Jcallback)
+    #neglaplacesolve!(field.Ax⁰, field.Jx⁰, field.ffthelper)
+    #neglaplacesolve!(field.Ay⁰, field.Jy⁰, field.ffthelper)
+    #neglaplacesolve!(field.Az⁰, field.Jz⁰, field.ffthelper)
+    field.ρJs⁺ .= 0
+
+    advect!(plasma, field.gridparams, dt/2, to) # n + 1/2
+    deposit!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺, plasma, field.gridparams, dt, to, ρcallback)
+    #neglaplacesolve!(field.ϕ⁺, field.ρ⁺, field.ffthelper)
+    advect!(plasma, field.gridparams, dt/2, to) # n+1
+    deposit!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺, plasma, field.gridparams, dt, to, Jcallback)
+    advect!(plasma, field.gridparams, -dt, to) # advect back to start
+    #neglaplacesolve!(field.Ax⁺, field.Jx⁺, field.ffthelper)
+    #neglaplacesolve!(field.Ay⁺, field.Jy⁺, field.ffthelper)
+    #neglaplacesolve!(field.Az⁺, field.Jz⁺, field.ffthelper)
+    field.ρJs⁺ .= 0
   end
 end
 
@@ -772,8 +867,9 @@ function warmup!(field::LorenzGaugeSemiImplicitField, plasma, to)
   @timeit to "Warmup" begin
     dt = timestep(field)
     warmup!(field.ρ⁻, field.Jx⁻, field.Jy⁻, field.Jz⁻, field.ρJs⁻, plasma, field.gridparams, -dt, to)
-    warmup!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁰, plasma, field.gridparams, 0, to)
+    warmup!(field.ρ⁰, field.Jx⁰, field.Jy⁰, field.Jz⁰, field.ρJs⁰, plasma, field.gridparams, dt, to)
     warmup!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺, plasma, field.gridparams, dt, to)
+    advect!(plasma, field.gridparams, -dt, to) # advect back to start
   end
 end
 
@@ -823,6 +919,7 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
   end
   @timeit to "Field Reduction" begin
     reduction!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ρJs⁺)
+    #smooth!(field.ρ⁺, field.Jx⁺, field.Jy⁺, field.Jz⁺, field.ffthelper)
     field.ρJs⁺ .= 0
   end
   @timeit to "Field Forward FT" begin
@@ -830,6 +927,10 @@ function loop!(plasma, field::LorenzGaugeStaggeredField, to, t, _)
     field.ffthelper.pfft! * field.Jx⁺;
     field.ffthelper.pfft! * field.Jy⁺;
     field.ffthelper.pfft! * field.Jz⁺;
+    field.ρ⁺ .*= field.ffthelper.smoothingkernel
+    field.Jx⁺ .*= field.ffthelper.smoothingkernel
+    field.Jy⁺ .*= field.ffthelper.smoothingkernel
+    field.Jz⁺ .*= field.ffthelper.smoothingkernel
     field.ρ⁺[1, 1] = 0
     field.Jx⁺[1, 1] = 0
     field.Jy⁺[1, 1] = 0
@@ -1383,8 +1484,8 @@ function plotfields(d::AbstractDiagnostics, field, n0, vc, NT; cutoff=Inf)
     xlabel!(L"Wavenumber x $[\Omega_c / V_{A}]$");
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumy_c.png")
-    xlabel!(L"Wavenumber x $[\Pi / V_{A}]$");
-    ylabel!(L"Frequency $[\Pi]$")
+    xlabel!(L"Wavenumber x $[\Omega / V_{A}]$");
+    ylabel!(L"Frequency $[\Omega]$")
     heatmap(kxs[2:kxind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
     savefig("PIC2D3V_$(FS)_WKsumy_p.png")
 
@@ -1394,8 +1495,8 @@ function plotfields(d::AbstractDiagnostics, field, n0, vc, NT; cutoff=Inf)
     ylabel!(L"Frequency $[\Omega_c]$")
     savefig("PIC2D3V_$(FS)_WKsumx_c.png")
     heatmap(kys[2:kyind] .* w0 / sqrt(n0), ws[1:wind] .* w0 / sqrt(n0), Z)
-    xlabel!(L"Wavenumber y $[\Pi / V_{A}]$");
-    ylabel!(L"Frequency $[\Pi]$")
+    xlabel!(L"Wavenumber y $[\Omega / V_{A}]$");
+    ylabel!(L"Frequency $[\Omega]$")
     savefig("PIC2D3V_$(FS)_WKsumx_p.png")
   end
 
