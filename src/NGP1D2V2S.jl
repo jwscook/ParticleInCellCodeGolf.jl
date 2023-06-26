@@ -10,8 +10,8 @@ function boris(vx, vy, E, B, dt, q_m)
   return (v⁺[1] + E * dt2q_m, v⁺[2])
 end
 function pic()
-  N=256;P=8N;T=2^15;TO=T÷32;M=8;
-  n0=4*pi^2;vth=sqrt(n0)/N;dt=1/N/8vth;B0=sqrt(n0)/8;w=n0/2P;
+  N=256;P=8N;T=2^16;TO=T÷32;M=8;
+  n0=4*pi^2;vth=sqrt(n0)/N/8;dt=1/N/16vth;B0=sqrt(n0)/8;w=n0/2P;
   @show N, P, T, TO, n0, vth, B0, dt
   @show 2pi^2 * (vth / B0)^2
   ξ=im*zeros(N);Es=zeros(N,TO); 
