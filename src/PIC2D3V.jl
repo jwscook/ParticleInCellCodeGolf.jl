@@ -239,7 +239,7 @@ end
 
 cellvolume(g::GridParameters) = g.ΔX * g.ΔY
 
-struct FFTHelper{T, U, V}
+struct FFTHelper{T, U}
   kx::Vector{Float64}
   ky::LinearAlgebra.Adjoint{Float64, Vector{Float64}}
   k²::Matrix{Float64}
@@ -247,7 +247,6 @@ struct FFTHelper{T, U, V}
   smoothingkernel::Matrix{ComplexF64}
   pfft!::T
   pifft!::U
-  pifft::V
 end
 function FFTHelper(NX, NY, Lx, Ly)
   kx = 2π / Lx * vcat(0:NX÷2-1, -NX÷2:-1);
@@ -263,9 +262,8 @@ function FFTHelper(NX, NY, Lx, Ly)
 
   pfft! = plan_fft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
   pifft! = plan_ifft!(z; flags=FFTW.ESTIMATE, timelimit=Inf)
-  pifft = plan_ifft(z; flags=FFTW.ESTIMATE, timelimit=Inf)
   pfft! * smoothingkernel
-  return FFTHelper(kx, ky, k², im_k⁻², smoothingkernel, pfft!, pifft!, pifft)
+  return FFTHelper(kx, ky, k², im_k⁻², smoothingkernel, pfft!, pifft!)
 end
 
 
