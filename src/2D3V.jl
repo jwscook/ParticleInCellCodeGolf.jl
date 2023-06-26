@@ -24,8 +24,8 @@ function pic()
   @show vthe / SPEED_OF_LIGHT
   @show lD = vthe / Wp
   @show Ωi = ELEMENTARY_CHARGE * B / M / ELEMENTARY_MASS
-  kresolution = 5
-  @show L = Va / Ωi * kresolution / 2π
+  kresolution = 20
+  @show L = Va / Ωi / 2π * kresolution
   @show nxrequired = L / lD
 
   @show m_lengthScale = L
@@ -45,9 +45,9 @@ function pic()
 
   to = TimerOutput()
 
-  NQ = 8
-  NX = 256 ÷ NQ
-  NY = 256 * NQ
+  NQ = 1
+  NX = 512 ÷ NQ
+  NY = 512 * NQ
 
   @show L0 = L / m_lengthScale
   @show dt = L / NX / SPEED_OF_LIGHT / m_timeScale / 4
@@ -60,7 +60,7 @@ function pic()
   #@timeit to "Initialisation" begin
     Lx = L0
     Ly = Lx * NY / NX
-    @show P = NX * NY * 2^4
+    @show P = NX * NY * 64
     @show NT = 2^13 #2^10#2^14
     dl = min(Lx / NX, Ly / NY)
     #n0 = 3.5e6 #4 * pi^2
@@ -86,7 +86,7 @@ function pic()
     field = PIC2D3V.LorenzGaugeStaggeredField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
       imex=PIC2D3V.ImEx(1), buffer=10)
     #field = PIC2D3V.LorenzGaugeSemiImplicitField(NX, NY, Lx, Ly, dt=dt, B0x=B0,
-    #  fieldimex=PIC2D3V.ImEx(1.0), sourceimex=PIC2D3V.ImEx(0.05), buffer=10, rtol=sqrt(eps()), maxiters=100)
+    #  fieldimex=PIC2D3V.ImEx(1.0), sourceimex=PIC2D3V.ImEx(0.05), buffer=10, rtol=sqrt(eps()), maxiters=1000)
     diagnostics = PIC2D3V.LorenzGaugeDiagnostics(NX, NY, NT, ntskip, 2; makegifs=false)
     shape = PIC2D3V.BSplineWeighting{@stat 5}()
     #shape = PIC2D3V.NGPWeighting();#
